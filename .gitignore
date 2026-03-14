@@ -1,2 +1,17 @@
 data/train/*
 data/test/*
+
+# Parquet
+*.parquet
+
+# CatBoost model
+*.cbm
+
+# CSV
+*.csv
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
