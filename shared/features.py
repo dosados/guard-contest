@@ -1,6 +1,7 @@
 """
-Вычисление фичей для пайплайна по агрегатам и текущей строке.
+Вычисление фичей по агрегатам и текущей строке.
 Фичи считаются до обновления агрегатов текущей транзакцией (online).
+Список FEATURE_NAMES задаёт порядок и состав фичей для модели — легко расширять.
 """
 
 from __future__ import annotations
@@ -8,8 +9,9 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING, Any
 
-from parquet_batch_aggregates import (
+from shared.parquet_batch_aggregates import (
     AMOUNT_COLUMN,
+    BROWSER_LANGUAGE_COLUMN,
     CHANNEL_INDICATOR_SUB_TYPE,
     CHANNEL_INDICATOR_TYPE,
     COMPROMISED_COLUMN,
@@ -18,15 +20,16 @@ from parquet_batch_aggregates import (
     MCC_CODE,
     OPERATING_SYSTEM_TYPE,
     PHONE_VOIP_CALL_STATE,
+    SESSION_ID_COLUMN,
     TIMEZONE_COLUMN,
     WEB_RDP_CONNECTION,
     parse_dttm,
 )
 
 if TYPE_CHECKING:
-    from parquet_batch_aggregates import UserAggregates
+    from shared.parquet_batch_aggregates import UserAggregates
 
-# Порядок и имена фичей для CatBoost (конфигурируемо для добавления новых)
+# Базовый список фичей (без transactions_seen)
 FEATURE_NAMES = [
     "operation_amt",
     "amount_to_median",
@@ -43,13 +46,35 @@ FEATURE_NAMES = [
     "is_compromised_device",
     "web_rdp_connection",
     "phone_voip_call_state",
+    # временные и сессионные
+    "hour",
+    "day_of_week",
+    "is_night_transaction",
+    "is_weekend",
+    "transactions_last_10m",
+    "sum_amount_last_24h",
+    "time_since_prev_transaction",
+    "is_new_browser_language",
+    "transactions_in_session",
+    "timezone_missing",
 ]
 
+# Имя фичи «сколько транзакций по клиенту уже было в датасете»
+TRANSACTIONS_SEEN_FEATURE = "transactions_seen"
 
-def compute_features(agg: UserAggregates, row: dict[str, Any]) -> dict[str, float]:
+# Полный список фичей для режима "full" (базовые + transactions_seen)
+FEATURE_NAMES_FULL = FEATURE_NAMES + [TRANSACTIONS_SEEN_FEATURE]
+
+
+def compute_features(
+    agg: "UserAggregates",
+    row: dict[str, Any],
+    transactions_seen: int | None = None,
+) -> dict[str, float]:
     """
     Считает все фичи по текущему состоянию агрегатов и строке.
     Вызывать до agg.update(row).
+    transactions_seen: если задано, добавляется фича transactions_seen (режим full).
     """
     amt_val = row.get(AMOUNT_COLUMN)
     try:
@@ -79,11 +104,24 @@ def compute_features(agg: UserAggregates, row: dict[str, Any]) -> dict[str, floa
         transactions_last_24h = 0
         sum_amount_last_1h = 0.0
         max_amount_last_24h = float("nan")
+        transactions_last_10m = 0
+        sum_amount_last_24h = 0.0
+        hour_val = -1
+        day_of_week_val = -1
+        time_since_prev = float("nan")
     else:
         transactions_last_1h = agg.transactions_last_1h(dttm)
         transactions_last_24h = agg.transactions_last_24h(dttm)
         sum_amount_last_1h = agg.sum_amount_last_1h(dttm)
         max_amount_last_24h = agg.max_amount_last_24h(dttm)
+        transactions_last_10m = agg.transactions_last_10m(dttm)
+        sum_amount_last_24h = agg.sum_amount_last_24h(dttm)
+        hour_val = dttm.hour
+        day_of_week_val = dttm.weekday()  # 0=Monday, 6=Sunday
+        if agg.last_event_dttm is not None:
+            time_since_prev = (dttm - agg.last_event_dttm).total_seconds()
+        else:
+            time_since_prev = float("nan")
 
     os_type = row.get(OPERATING_SYSTEM_TYPE)
     dev_ver = row.get(DEVICE_SYSTEM_VERSION)
@@ -102,7 +140,17 @@ def compute_features(agg: UserAggregates, row: dict[str, Any]) -> dict[str, floa
     web_rdp_connection = 1.0 if row.get(WEB_RDP_CONNECTION) not in (None, "") else 0.0
     phone_voip_call_state = 1.0 if row.get(PHONE_VOIP_CALL_STATE) not in (None, "") else 0.0
 
-    return {
+    # Ночная транзакция: 22:00–05:59
+    is_night = 1.0 if hour_val >= 22 or hour_val < 6 else 0.0
+    is_weekend = 1.0 if day_of_week_val >= 5 else 0.0  # 5=Sat, 6=Sun
+    bl = row.get(BROWSER_LANGUAGE_COLUMN)
+    is_new_browser_language = 1.0 if (bl is not None and str(bl).strip() != "" and bl not in agg.seen_browser_languages) else 0.0
+    sid = row.get(SESSION_ID_COLUMN)
+    transactions_in_session = float(agg.get_session_count(sid) + 1)  # включая текущую
+    tz_val = row.get(TIMEZONE_COLUMN)
+    timezone_missing = 1.0 if (tz_val is None or (isinstance(tz_val, str) and tz_val.strip() == "")) else 0.0
+
+    result = {
         "operation_amt": amount,
         "amount_to_median": amount_to_median,
         "amount_zscore": amount_zscore,
@@ -118,4 +166,17 @@ def compute_features(agg: UserAggregates, row: dict[str, Any]) -> dict[str, floa
         "is_compromised_device": is_compromised_device,
         "web_rdp_connection": web_rdp_connection,
         "phone_voip_call_state": phone_voip_call_state,
+        "hour": float(hour_val) if hour_val >= 0 else float("nan"),
+        "day_of_week": float(day_of_week_val) if day_of_week_val >= 0 else float("nan"),
+        "is_night_transaction": is_night,
+        "is_weekend": is_weekend,
+        "transactions_last_10m": float(transactions_last_10m),
+        "sum_amount_last_24h": sum_amount_last_24h,
+        "time_since_prev_transaction": -1.0 if math.isnan(time_since_prev) else time_since_prev,
+        "is_new_browser_language": is_new_browser_language,
+        "transactions_in_session": transactions_in_session,
+        "timezone_missing": timezone_missing,
     }
+    if transactions_seen is not None:
+        result[TRANSACTIONS_SEEN_FEATURE] = float(transactions_seen)
+    return result

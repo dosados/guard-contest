@@ -4,8 +4,15 @@ data/test/*
 # Parquet
 *.parquet
 
-# CatBoost model
+# CatBoost training artifacts
+catboost_info/
+
+# Model weights
 *.cbm
+output/model.cbm
+output/model_xgb.json
+output/model_lgb.txt
+output/model_pytorch.pt
 
 # CSV
 *.csv

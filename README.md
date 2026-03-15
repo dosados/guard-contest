@@ -133,4 +133,54 @@ compromised – наличие Root-доступа на устройстве
 
 данные хранятся в Data/test и Data/train
 
+---
+
+## Структура решения и точки входа
+
+Код разбит на три логических пакета. Запуск из **корня репозитория** с `PYTHONPATH=.`.
+
+### 1. Создание датасета (`dataset`)
+
+**Точка входа:** `python dataset/main.py`
+
+- Проход по **pretrain** → построение агрегированных фичей по пользователям.
+- Для каждой **размеченной** записи в **train**: считаются фичи по текущим агрегатам, строка (все фичи + `event_id` + `target`) добавляется в датасет, затем агрегаты обновляются этой записью.
+- Метки `target` берутся из `data/train_labels.parquet`.
+- Результат: `output/train_dataset.parquet` — датасет для обучения модели.
+
+### 2. Обучение и валидация модели (`training`)
+
+**Точка входа:** `python training/main.py`
+
+- Загружает `output/train_dataset.parquet`.
+- Разбивает данные на train/val (доля валидации и seed в `training/config.py`).
+- Обучает модель (по умолчанию CatBoost), считает PR-AUC на валидации.
+- Сохраняет веса в `output/model.cbm`.
+
+Параметры модели и разбиения — в `training/config.py` (удобно менять для экспериментов).
+
+### 3. Построение файла для сдачи (`submission`)
+
+**Точка входа:** `python submission/main.py` — только для сдачи.
+
+- Загружает `output/model.cbm`, агрегирует по **pretest**, проходит по **test**.
+- Для каждой тестовой операции считает фичи и предсказание.
+- Сохраняет `output/submission.csv` в формате: `event_id`, `predict` (все 633 683 строки).
+
+---
+
+### Общий код и конфигурация
+
+- **`shared/`** — пути к данным (`shared/config.py`), фичи (`shared/features.py`), агрегаты (`shared/parquet_batch_aggregates.py`). Чтобы добавить/изменить агрегируемые фичи, правь `FEATURE_NAMES` и логику в `shared/features.py` и при необходимости `FEATURE_COLUMNS` в `shared/parquet_batch_aggregates.py`.
+- **Пути к данным:** `shared/config.py` (например `DATA_ROOT`, `TRAIN_LABELS_PATH`).
+- **Параметры модели и val:** `training/config.py`.
+
+### Режимы создания датасета (`DATASET_MODE`)
+
+В `shared/config.py` задаётся **`DATASET_MODE`**:
+
+- **`"full"`** (по умолчанию): агрегаты по полной истории; в датасет добавляется фича **`transactions_seen`** — количество транзакций по этому клиенту, которые уже попали в датасет к моменту текущей строки.
+- **`"window_50"`**: те же метрики, что и в full, но считаются **только по последним 50 транзакциям** клиента (скользящее окно). Фича `transactions_seen` не используется.
+
+Переключение: поменяй `DATASET_MODE` и заново запусти `dataset/main.py`, затем `training/main.py`. Для сдачи запускай `submission/main.py` с тем же `DATASET_MODE`, с которым обучалась модель. Размер окна для режима `window_50` задаётся в `shared/config.py` как **`WINDOW_TRANSACTIONS`** (по умолчанию 50).
 
