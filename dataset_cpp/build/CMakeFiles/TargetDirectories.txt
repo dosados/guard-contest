@@ -1,0 +1,3 @@
+/home/timofey/Documents/own/guard-contest/dataset_cpp/build/CMakeFiles/build_dataset.dir
+/home/timofey/Documents/own/guard-contest/dataset_cpp/build/CMakeFiles/edit_cache.dir
+/home/timofey/Documents/own/guard-contest/dataset_cpp/build/CMakeFiles/rebuild_cache.dir

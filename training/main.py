@@ -59,7 +59,7 @@ def main() -> None:
         )
     logger.info("Loading dataset from %s", TRAIN_DATASET_PATH)
     df = pd.read_parquet(TRAIN_DATASET_PATH)
-    non_feature_columns = {"event_id", TARGET_COLUMN, "event_dttm"}
+    non_feature_columns = {"event_id", TARGET_COLUMN, "event_dttm", "sample_weight"}
     feature_columns = [c for c in df.columns if c not in non_feature_columns]
     if not feature_columns:
         raise ValueError("No feature columns in dataset (expected columns other than event_id, target, event_dttm)")
@@ -83,6 +83,9 @@ def main() -> None:
     y_train = df.loc[train_idx, TARGET_COLUMN]
     X_val = df.loc[val_idx, feature_columns]
     y_val = df.loc[val_idx, TARGET_COLUMN]
+
+    sample_weight_train = df.loc[train_idx, "sample_weight"] if "sample_weight" in df.columns else None
+    sample_weight_val = df.loc[val_idx, "sample_weight"] if "sample_weight" in df.columns else None
     logger.info(
         "Time-based split: train=%s (first by time), val=%s (last by time)",
         len(X_train),
@@ -97,7 +100,9 @@ def main() -> None:
     model_cb = CatBoostClassifier(**CATBOOST_PARAMS)
     model_cb.fit(
         X_train, y_train,
+        sample_weight=sample_weight_train,
         eval_set=(X_val, y_val),
+        eval_sample_weight=sample_weight_val,
         verbose=CATBOOST_PARAMS.get("verbose", 100),
     )
     logger.info("CatBoost fit done, computing validation PR-AUC...")
@@ -113,7 +118,9 @@ def main() -> None:
     model_xgb = xgb.XGBClassifier(**XGB_PARAMS)
     model_xgb.fit(
         X_train, y_train,
+        sample_weight=sample_weight_train,
         eval_set=[(X_val, y_val)],
+        eval_sample_weight=[sample_weight_val] if sample_weight_val is not None else None,
         verbose=100,
     )
     pr_auc_xgb = average_precision_score(y_val, model_xgb.predict_proba(X_val)[:, 1])
@@ -126,7 +133,9 @@ def main() -> None:
     model_lgb = lgb.LGBMClassifier(**LGBM_PARAMS)
     model_lgb.fit(
         X_train, y_train,
+        sample_weight=sample_weight_train,
         eval_set=[(X_val, y_val)],
+        eval_sample_weight=[sample_weight_val] if sample_weight_val is not None else None,
         callbacks=[lgb.log_evaluation(100)],
     )
     pr_auc_lgb = average_precision_score(y_val, model_lgb.predict_proba(X_val)[:, 1])
@@ -140,11 +149,15 @@ def main() -> None:
     X_val_np = X_val.fillna(0).values
     y_train_np = y_train.values
     y_val_np = y_val.values
+    w_train_np = sample_weight_train.values.astype(np.float32) if sample_weight_train is not None else None
+    w_val_np = sample_weight_val.values.astype(np.float32) if sample_weight_val is not None else None
     model_pt, pr_auc_pt = train_and_validate(
         X_train_np,
         y_train_np,
         X_val_np,
         y_val_np,
+        sample_weight_train=w_train_np,
+        sample_weight_val=w_val_np,
         **PYTORCH_PARAMS,
     )
     metrics.append(("PyTorch MLP", pr_auc_pt))

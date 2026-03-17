@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 from typing import TYPE_CHECKING, Any
 
@@ -16,6 +17,8 @@ from shared.parquet_batch_aggregates import (
     CHANNEL_INDICATOR_TYPE,
     COMPROMISED_COLUMN,
     DEVICE_SYSTEM_VERSION,
+    EVENT_DESC_COLUMN,
+    EVENT_DESCR_COLUMN,
     EVENT_DTTM_COLUMN,
     MCC_CODE,
     OPERATING_SYSTEM_TYPE,
@@ -29,7 +32,6 @@ from shared.parquet_batch_aggregates import (
 if TYPE_CHECKING:
     from shared.parquet_batch_aggregates import UserAggregates
 
-# Базовый список фичей (без transactions_seen)
 FEATURE_NAMES = [
     "operation_amt",
     "amount_to_median",
@@ -57,24 +59,31 @@ FEATURE_NAMES = [
     "is_new_browser_language",
     "transactions_in_session",
     "timezone_missing",
+    "tr_amount",  # количество транзакций в окне для пользователя (макс. размер окна при переполнении)
+    "event_descr",
+    "mcc_code",
 ]
 
-# Имя фичи «сколько транзакций по клиенту уже было в датасете»
-TRANSACTIONS_SEEN_FEATURE = "transactions_seen"
 
-# Полный список фичей для режима "full" (базовые + transactions_seen)
-FEATURE_NAMES_FULL = FEATURE_NAMES + [TRANSACTIONS_SEEN_FEATURE]
+def _cat_to_float(val: Any) -> float:
+    """Кодирует категориальное значение в число (стабильный хеш) для пайплайна модель/предсказание."""
+    if val is None:
+        return 0.0
+    s = str(val).strip()
+    if s == "":
+        return 0.0
+    return float(int(hashlib.md5(s.encode()).hexdigest(), 16) % 1_000_000)
 
 
 def compute_features(
     agg: "UserAggregates",
     row: dict[str, Any],
-    transactions_seen: int | None = None,
+    tr_amount: int | None = None,
 ) -> dict[str, float]:
     """
     Считает все фичи по текущему состоянию агрегатов и строке.
     Вызывать до agg.update(row).
-    transactions_seen: если задано, добавляется фича transactions_seen (режим full).
+    tr_amount: количество транзакций в окне для пользователя (если окно переполнено — размер окна).
     """
     amt_val = row.get(AMOUNT_COLUMN)
     try:
@@ -176,7 +185,9 @@ def compute_features(
         "is_new_browser_language": is_new_browser_language,
         "transactions_in_session": transactions_in_session,
         "timezone_missing": timezone_missing,
+        "event_descr": _cat_to_float(row.get(EVENT_DESCR_COLUMN) or row.get(EVENT_DESC_COLUMN)),
+        "mcc_code": _cat_to_float(row.get(MCC_CODE)),
     }
-    if transactions_seen is not None:
-        result[TRANSACTIONS_SEEN_FEATURE] = float(transactions_seen)
+    if tr_amount is not None:
+        result["tr_amount"] = float(tr_amount)
     return result

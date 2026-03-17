@@ -17,7 +17,6 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from collections import defaultdict
 from pathlib import Path
 from typing import Callable
 
@@ -35,8 +34,6 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from shared.config import (
-    BATCH_SIZE,
-    DATASET_MODE,
     MODEL_LGB_PATH,
     MODEL_PATH,
     MODEL_PYTORCH_PATH,
@@ -48,18 +45,12 @@ from shared.config import (
     WINDOW_TRANSACTIONS,
     WINDOWED_BATCH_SIZE,
 )
-from shared.features import (
-    FEATURE_NAMES,
-    FEATURE_NAMES_FULL,
-    compute_features,
-)
+from shared.features import FEATURE_NAMES, compute_features
 from shared.parquet_batch_aggregates import (
     CUSTOMER_ID_COLUMN,
     EVENT_ID_COLUMN,
     FEATURE_COLUMNS,
-    UserAggregates,
     WindowedAggregates,
-    build_user_aggregates,
     build_windowed_aggregates,
 )
 
@@ -73,9 +64,7 @@ MODEL_CHOICES = ("catboost", "xgboost", "lightgbm", "pytorch")
 
 
 def _get_feature_names() -> list[str]:
-    """Список фичей в том же порядке, что и в датасете (зависит от DATASET_MODE)."""
-    if DATASET_MODE == "full":
-        return FEATURE_NAMES_FULL
+    """Список фичей в том же порядке, что и в датасете."""
     return FEATURE_NAMES
 
 
@@ -106,8 +95,11 @@ def _load_model_and_predictor(
         logger.info("Loaded XGBoost from %s", MODEL_XGB_PATH)
 
         def predict_fn(x: list[float]) -> float:
-            p = m.predict_proba(np.array([x], dtype=np.float32))
-            return float(p[0, 1])
+            a = np.array([x], dtype=np.float32)
+            a = np.nan_to_num(a, nan=0.0, posinf=0.0, neginf=0.0)
+            # output_margin=True даёт "сырые" логиты, которые могут быть >1 или <0
+            margin = m.predict(a, output_margin=True)
+            return float(margin[0])
 
         return m, predict_fn
 
@@ -121,7 +113,8 @@ def _load_model_and_predictor(
             # Booster.predict ожидает 2D array
             a = np.array([x], dtype=np.float32)
             a = np.nan_to_num(a, nan=0.0, posinf=0.0, neginf=0.0)
-            return float(m.predict(a)[0])
+            # raw_score=True — логиты (до сигмоиды), могут быть >1 или <0
+            return float(m.predict(a, raw_score=True)[0])
 
         return m, predict_fn
 
@@ -143,7 +136,8 @@ def _load_model_and_predictor(
             t = torch.from_numpy(arr).to(dev)
             with torch.no_grad():
                 logit = m(t).squeeze()
-            return torch.sigmoid(logit).item()
+            # Возвращаем логит: >1 — высокая уверенность в целевом классе, <0 — в нецелевом
+            return float(logit.item())
 
         return m, predict_fn
 
@@ -165,43 +159,23 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    use_full = DATASET_MODE == "full"
-    use_window = DATASET_MODE == "window_50"
-    if not use_full and not use_window:
-        raise ValueError(
-            f"DATASET_MODE must be 'full' or 'window_50', got {DATASET_MODE!r}. "
-            "Set shared.config.DATASET_MODE to match the mode used for dataset and training."
-        )
     feature_names = _get_feature_names()
-    logger.info("Submission mode: %s, feature count: %s", DATASET_MODE, len(feature_names))
+    logger.info("Submission: window=%s, feature count: %s", WINDOW_TRANSACTIONS, len(feature_names))
 
     _, predict_fn = _load_model_and_predictor(args.model, feature_names)
 
     pretest_paths = [PRETEST_PATH] if isinstance(PRETEST_PATH, Path) else list(PRETEST_PATH)
     pretest_paths = [p for p in pretest_paths if p.exists()]
 
-    if use_full:
-        if not pretest_paths:
-            logger.warning("Pretest not found at %s, starting with empty aggregates", PRETEST_PATH)
-        aggregates = defaultdict(
-            UserAggregates,
-            build_user_aggregates(
-                pretest_paths, batch_size=BATCH_SIZE, show_progress=True
-            ),
-        )
-        windowed_aggregates = None
-        logger.info("Pretest done (full), %s users", len(aggregates))
-    else:
-        if not pretest_paths:
-            logger.warning("Pretest not found at %s, starting with empty windowed aggregates", PRETEST_PATH)
-        windowed_aggregates = build_windowed_aggregates(
-            pretest_paths,
-            window_size=WINDOW_TRANSACTIONS,
-            batch_size=WINDOWED_BATCH_SIZE,
-            show_progress=True,
-        )
-        aggregates = None
-        logger.info("Pretest done (window=%s), %s users", WINDOW_TRANSACTIONS, len(windowed_aggregates))
+    if not pretest_paths:
+        logger.warning("Pretest not found at %s, starting with empty windowed aggregates", PRETEST_PATH)
+    windowed_aggregates = build_windowed_aggregates(
+        pretest_paths,
+        window_size=WINDOW_TRANSACTIONS,
+        batch_size=WINDOWED_BATCH_SIZE,
+        show_progress=True,
+    )
+    logger.info("Pretest done (window=%s), %s users", WINDOW_TRANSACTIONS, len(windowed_aggregates))
 
     if not TEST_PATH.exists():
         raise FileNotFoundError(f"Test file not found: {TEST_PATH}")
@@ -212,10 +186,8 @@ def main() -> None:
         columns.append(EVENT_ID_COLUMN)
 
     predictions: list[tuple[int, float]] = []
-    per_customer_test_count: dict[int | str, int] = {}
-    batch_size_test = WINDOWED_BATCH_SIZE if use_window else BATCH_SIZE
 
-    for batch in pf.iter_batches(columns=columns, batch_size=batch_size_test):
+    for batch in pf.iter_batches(columns=columns, batch_size=WINDOWED_BATCH_SIZE):
         col_lists = {name: batch.column(name).to_pylist() for name in batch.schema.names}
         n = batch.num_rows
         for i in range(n):
@@ -224,17 +196,12 @@ def main() -> None:
             if cid is None:
                 continue
             event_id = row.get(EVENT_ID_COLUMN)
-            if use_full:
-                transactions_seen = per_customer_test_count.get(cid, 0)
-                feats = compute_features(aggregates[cid], row, transactions_seen=transactions_seen)
-                aggregates[cid].update(row)
-                per_customer_test_count[cid] = transactions_seen + 1
-            else:
-                if cid not in windowed_aggregates:
-                    windowed_aggregates[cid] = WindowedAggregates(WINDOW_TRANSACTIONS)
-                agg = windowed_aggregates[cid].get_aggregates()
-                feats = compute_features(agg, row)
-                windowed_aggregates[cid].add(row)
+            if cid not in windowed_aggregates:
+                windowed_aggregates[cid] = WindowedAggregates(WINDOW_TRANSACTIONS)
+            agg = windowed_aggregates[cid].get_aggregates()
+            tr_amount = min(len(windowed_aggregates[cid]), WINDOW_TRANSACTIONS)
+            feats = compute_features(agg, row, tr_amount=tr_amount)
+            windowed_aggregates[cid].add(row)
             x = [feats[name] for name in feature_names]
             pred_val = predict_fn(x)
             predictions.append((event_id, pred_val))

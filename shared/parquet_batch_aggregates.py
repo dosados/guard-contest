@@ -37,11 +37,16 @@ BROWSER_LANGUAGE_COLUMN = "browser_language"
 RECENT_EVENTS_HOURS = 24
 EVENT_ID_COLUMN = "event_id"
 
+EVENT_DESCR_COLUMN = "event_descr"
+EVENT_DESC_COLUMN = "event_desc"  # альтернативное имя колонки в данных
+
 # Колонки для агрегации и фичей — расширяемый список
 FEATURE_COLUMNS = [
     CUSTOMER_ID_COLUMN,
     AMOUNT_COLUMN,
     EVENT_DTTM_COLUMN,
+    EVENT_DESCR_COLUMN,
+    EVENT_DESC_COLUMN,
     OPERATING_SYSTEM_TYPE,
     DEVICE_SYSTEM_VERSION,
     MCC_CODE,
@@ -153,6 +158,48 @@ class UserAggregates:
         bl = row.get(BROWSER_LANGUAGE_COLUMN)
         if bl is not None and str(bl).strip() != "":
             self.seen_browser_languages.add(bl)
+
+    def remove(self, row: dict[str, Any]) -> None:
+        """
+        Обратная операция к update() для числовых и временных агрегатов.
+        Используется при работе в фиксированном окне по числу транзакций:
+        когда самая старая транзакция выходит из окна, её вклад вычитается.
+
+        Для множественных признаков (seen_* и session_counts) мы намеренно
+        не выполняем «откат» до точного окна, чтобы не усложнять логику;
+        они остаются монотонными по пользователю, что приемлемо для наших фичей.
+        """
+        amt_val = row.get(AMOUNT_COLUMN)
+        if amt_val is None:
+            return
+        try:
+            amount = float(amt_val)
+        except (TypeError, ValueError):
+            return
+
+        # Обновляем суммарные статистики, если есть что вычитать
+        if self.count > 0:
+            self.sum_amt -= amount
+            self.sum_sq -= amount * amount
+            self.count -= 1
+            if self.count < 0:
+                self.count = 0
+
+        # Удаляем одно вхождение amount из списка amounts (если есть)
+        for idx, val in enumerate(self.amounts):
+            if val == amount:
+                del self.amounts[idx]
+                break
+
+        # Удаляем соответствующее событие из recent_events (если попадает)
+        dttm = parse_dttm(row.get(EVENT_DTTM_COLUMN))
+        if dttm is not None and self.recent_events:
+            # Поскольку удаляем самую старую транзакцию, она должна быть
+            # ближе к началу очереди; ищем первое совпадение.
+            for idx, (evt_dttm, evt_amt) in enumerate(self.recent_events):
+                if evt_dttm == dttm and evt_amt == amount:
+                    del self.recent_events[idx]
+                    break
 
     def mean(self) -> float:
         if self.count == 0:
@@ -279,26 +326,38 @@ def _compact_to_row(compact: tuple) -> dict[str, Any]:
 class WindowedAggregates:
     """
     Хранит только последние window_size транзакций по пользователю в компактном
-    виде (кортежи), чтобы не держать ссылки на батчи и не переполнять память.
-    get_aggregates() строит UserAggregates из этого окна для вычисления фичей.
+    виде (кортежи), а также один «живой» UserAggregates, который инкрементально
+    обновляется при сдвиге окна.
     """
 
-    __slots__ = ("_rows", "_window_size")
+    __slots__ = ("_rows", "_window_size", "_agg")
 
     def __init__(self, window_size: int) -> None:
         self._rows: deque[tuple] = deque(maxlen=window_size)
         self._window_size = window_size
+        self._agg: UserAggregates = UserAggregates()
 
     def add(self, row: dict[str, Any]) -> None:
-        """Добавляет транзакцию в окно в компактном виде (если окно полное, самая старая удаляется)."""
-        self._rows.append(_row_to_compact(row))
+        """
+        Добавляет транзакцию в окно в компактном виде.
+        Если окно уже заполнено, самая старая транзакция удаляется, и её вклад
+        вычитается из агрегатов (через UserAggregates.remove()).
+        """
+        compact = _row_to_compact(row)
+        if len(self._rows) == self._rows.maxlen:
+            old_compact = self._rows.popleft()
+            old_row = _compact_to_row(old_compact)
+            self._agg.remove(old_row)
+        self._rows.append(compact)
+        # Обновляем агрегаты новой транзакцией
+        self._agg.update(_compact_to_row(compact))
 
     def get_aggregates(self) -> UserAggregates:
-        """Строит UserAggregates только из транзакций в окне (без текущей строки)."""
-        agg = UserAggregates()
-        for compact in self._rows:
-            agg.update(_compact_to_row(compact))
-        return agg
+        """
+        Возвращает текущие агрегаты по окну.
+        ВНИМАНИЕ: возвращается ссылка на внутренний объект, не изменяй его снаружи.
+        """
+        return self._agg
 
     def __len__(self) -> int:
         return len(self._rows)

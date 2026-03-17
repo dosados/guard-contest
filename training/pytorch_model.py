@@ -60,6 +60,8 @@ def train_and_validate(
     dropout: float = 0.2,
     device: str | None = None,
     verbose: int = 10,
+    sample_weight_train: np.ndarray | None = None,
+    sample_weight_val: np.ndarray | None = None,
 ) -> tuple[MLP, float]:
     """
     Обучает MLP и возвращает модель и PR-AUC на валидации.
@@ -73,14 +75,26 @@ def train_and_validate(
         hidden_sizes=hidden_sizes,
         dropout=dropout,
     ).to(dev)
-    criterion = nn.BCEWithLogitsLoss()
+    criterion = nn.BCEWithLogitsLoss(reduction="none")
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
     X_t = _to_tensor(X_train, dev)
     y_t = torch.from_numpy(y_train.astype(np.float32).reshape(-1, 1)).squeeze(-1).to(dev)
+    if sample_weight_train is not None:
+        w_t = torch.from_numpy(sample_weight_train.astype(np.float32).reshape(-1, 1)).squeeze(-1).to(dev)
+    else:
+        w_t = None
     X_v = _to_tensor(X_val, dev)
+    if sample_weight_val is not None:
+        w_v = torch.from_numpy(sample_weight_val.astype(np.float32).reshape(-1, 1)).squeeze(-1).to(dev)
+    else:
+        w_v = None
+    if w_t is not None:
+        train_dataset = TensorDataset(X_t, y_t, w_t)
+    else:
+        train_dataset = TensorDataset(X_t, y_t)
     loader = DataLoader(
-        TensorDataset(X_t, y_t),
+        train_dataset,
         batch_size=batch_size,
         shuffle=True,
         drop_last=False,
@@ -89,10 +103,18 @@ def train_and_validate(
     model.train()
     for epoch in range(epochs):
         total_loss = 0.0
-        for batch_x, batch_y in loader:
+        for batch in loader:
+            if w_t is not None:
+                batch_x, batch_y, batch_w = batch
+            else:
+                batch_x, batch_y = batch
+                batch_w = None
             optimizer.zero_grad()
             logits = model(batch_x)
-            loss = criterion(logits, batch_y)
+            loss_vec = criterion(logits, batch_y)
+            if batch_w is not None:
+                loss_vec = loss_vec * batch_w
+            loss = loss_vec.mean()
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
