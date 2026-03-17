@@ -1,0 +1,17 @@
+name: guard-contest
+channels:
+  - defaults
+dependencies:
+  - python=3.10
+  - pandas
+  - xgboost
+  - scikit-learn
+  - catboost
+  - pyarrow
+  - tqdm
+  - lightgbm
+  - matplotlib
+  - arrow-cpp
+  - parquet-cpp
+  - openssl
+prefix: /home/timofey/miniconda3/envs/guard-contest

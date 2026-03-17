@@ -1,163 +1,259 @@
-================================================================================
-  GUARD CONTEST — Гайд по модулям и работе с пайплайном
-================================================================================
+ИНСТРУКЦИЯ ПО РЕПОЗИТОРИЮ «СТРАЖ»
 
-Все команды выполняются из КОРНЯ репозитория с PYTHONPATH=. (или python3 вместо python).
+Файлы и каталоги:
+- dataset/ — сборка обучающего датасета (Python).
+- dataset_cpp/ — альтернативная, более быстрая сборка датасета на C++.
+- training/ — обучение и валидация моделей.
+- submission/ — построение файла submission.csv для отправки.
+- shared/ — общие настройки путей и логика фичей/агрегатов.
+- scripts/ — вспомогательные скрипты анализа данных и фичей.
+- data/ — исходные данные соревнования (parquet-файлы).
+- output/ — все артефакты пайплайна (датасет, модели, графики, submission.csv).
 
-  cd /path/to/guard-contest
-  export PYTHONPATH=.
+Все команды ниже нужно запускать из корня репозитория, с установленной переменной PYTHONPATH=.
 
---------------------------------------------------------------------------------
-1. ОБЗОР МОДУЛЕЙ
---------------------------------------------------------------------------------
+1. СТРУКТУРА ПАПКИ data
 
-  shared/      — общий код: пути, фичи, агрегаты (используется остальными пакетами)
-  dataset/     — создание датасета для обучения (режим задаётся в shared/config.py)
-  training/    — разбиение, обучение модели, валидация
-  submission/  — построение файла для сдачи в систему
+Ожидаемая структура после распаковки данных соревнования и приведения имён к тем, которые использует код:
 
-Порядок работы: dataset → training → submission (последний только при сдаче).
+data/
+  train/
+    pretrain_part_1.parquet
+    pretrain_part_2.parquet
+    pretrain_part_3.parquet
+    train_part_1.parquet
+    train_part_2.parquet
+    train_part_3.parquet
+  test/
+    pretest.parquet
+    test.parquet
+  train_labels.parquet
 
-  Режимы датасета (DATASET_MODE в shared/config.py):
-    • "full"       — полная история по клиенту + фича transactions_seen
-    • "window_50"  — те же метрики, но только по последним 50 транзакциям клиента
+Смысл файлов:
+- pretrain_part_*.parquet — длинная история операций клиентов без разметки (pre-train).
+- train_part_*.parquet — история операций с тем же периодом, где есть операции с обратной связью (train).
+- train_labels.parquet — разметка train:
+  - event_id — идентификатор операции;
+  - target — 0 (подозрительная, но подтвержденная операция) или 1 (неподтвержденная операция, целевой класс).
+- pretest.parquet — история операций тестовых клиентов до «последнего дня».
+- test.parquet — сами операции «последнего дня», по которым нужно предсказать целевой класс.
 
-  При смене режима заново запускай dataset/main.py и training/main.py.
-  При сдаче submission/main.py должен работать с тем же DATASET_MODE, что и обучение.
+2. ОБЩАЯ ЛОГИКА КОДА
 
+Пайплайн состоит из трёх основных этапов:
+1) Сборка признакового датасета для обучения (dataset/ или dataset_cpp/).
+2) Обучение моделей и выбор лучшей по PR-AUC (training/).
+3) Построение submission.csv на тестовых данных (submission/).
 
---------------------------------------------------------------------------------
-2. МОДУЛЬ dataset — создание датасета
---------------------------------------------------------------------------------
+Признаки считаются онлайн по клиенту:
+- сначала по pretrain строятся агрегаты по пользователям (средние, перцентили сумм, количество транзакций в разных окнах, встречавшиеся устройства, MCC, каналы, таймзоны, языки и т.п.);
+- затем для каждой строки из train или test:
+  - по текущим агрегатам вычисляются фичи (shared/features.py);
+  - строка добавляется в датасет (для train также задаётся target и sample_weight);
+  - агрегаты обновляются этой транзакцией.
 
-  Запуск:
-    PYTHONPATH=. python3 dataset/main.py
+3. СОЗДАНИЕ ДАТАСЕТА: ДВА СПОСОБА
 
-  Режим задаётся в shared/config.py: DATASET_MODE = "full" или "window_50".
+СПОСОБ 1. PYTHON-ПАЙПЛАЙН (dataset/main.py)
 
-  Режим "full":
-    • Читает pretrain, строит агрегаты по полной истории пользователей.
-    • Проходит по train: для каждой РАЗМЕЧЕННОЙ операции считает фичи по текущим
-      агрегатам, добавляет в датасет фичу transactions_seen (сколько размеченных
-      транзакций по этому клиенту уже попало в датасет), затем обновляет агрегаты.
-    • Метки target — из data/train_labels.parquet.
+Этот способ полностью на Python и использует общий код из shared/.
 
-  Режим "window_50":
-    • Читает pretrain, для каждого пользователя хранит только последние
-      WINDOW_TRANSACTIONS (по умолчанию 50) транзакций.
-    • Проходит по train: для каждой размеченной операции фичи считаются только
-      по этому окну (как будто это вся история клиента), затем транзакция
-      добавляется в окно. Фича transactions_seen не используется.
+Основные настройки путей и режима:
+- shared/config.py:
+  - DATA_ROOT, TRAIN_DATA_ROOT, TEST_DATA_ROOT — пути к data/;
+  - PRETRAIN_PATHS — список pretrain_part_1..3;
+  - TRAIN_PATHS — список train_part_1..3;
+  - TRAIN_LABELS_PATH — путь к train_labels.parquet;
+  - TRAIN_DATASET_PATH — путь к итоговому датасету (по умолчанию output/train_dataset.parquet);
+  - WINDOW_TRANSACTIONS — размер окна по количеству последних транзакций на пользователя (по умолчанию 150);
+  - WINDOWED_BATCH_SIZE — размер батча при побатчевой обработке parquet;
+  - DATASET_N_WORKERS — сколько процессов использовать при параллельной сборке.
 
-  Результат:
-    output/train_dataset.parquet — таблица с колонками фичей + event_id + target
-    (в режиме full на одну колонку больше: transactions_seen).
+Логика dataset/main.py:
+- читает train_labels.parquet и строит словарь event_id → target;
+- из pretrain_part_*.parquet с помощью shared.parquet_batch_aggregates.build_windowed_aggregates строит оконные агрегаты по пользователям (хранится только последние WINDOW_TRANSACTIONS транзакций на клиента);
+- по train_part_*.parquet построчно:
+  - находит агрегаты по customer_id;
+  - считает фичи compute_features(agg, row, tr_amount) (shared/features.py);
+  - задаёт target:
+    - если event_id есть в train_labels.parquet → target=1 (целевой класс, т.к. есть обратная связь),
+    - иначе target=0 (операция без обратной связи);
+  - задаёт sample_weight:
+    - WEIGHT_UNLABELED для операций без обратной связи,
+    - WEIGHT_LABELED_0 для label 0,
+    - WEIGHT_LABELED_1 для label 1 (наиболее важные примеры);
+  - добавляет фичи, event_id, target, sample_weight и event_dttm в выходной датасет;
+  - обновляет оконные агрегаты текущей строкой.
+- по окончании формирует pandas.DataFrame с колонками:
+  - все FEATURE_NAMES из shared/features.py;
+  - event_id;
+  - target;
+  - sample_weight;
+  - event_dttm;
+- сохраняет его в output/train_dataset.parquet.
 
-  Когда запускать:
-    После смены DATASET_MODE, фичей или сырых данных (pretrain/train).
-    Потом можно многократно обучать модель без пересчёта датасета.
+Запуск (из корня репозитория):
+  PYTHONPATH=. python dataset/main.py
 
+На выходе: единый файл output/train_dataset.parquet, который далее используется training/main.py и аналитическими скриптами из scripts/.
 
---------------------------------------------------------------------------------
-3. МОДУЛЬ training — обучение и валидация
---------------------------------------------------------------------------------
+СПОСОБ 2. C++-СБОРКА ДАТАСЕТА (dataset_cpp/build_dataset.cpp)
 
-  Запуск:
-    PYTHONPATH=. python3 training/main.py
+Этот способ реализует ту же идею на C++ (через Apache Arrow + Parquet) и рассчитан на более быструю обработку больших объёмов данных.
 
-  Что делает:
-    • Загружает output/train_dataset.parquet.
-    • Фичи берутся автоматически из колонок parquet (кроме event_id, target, event_dttm),
-      поэтому подходит и full, и window_50.
-    • Делит по времени на train/val (доля валидации и seed — в конфиге).
-    • Обучает модели (CatBoost, XGBoost, LightGBM, PyTorch), считает PR-AUC на val.
-    • Сохраняет веса в output/ (model.cbm, model_xgb.json и т.д.).
+Ожидаемая структура данных такая же, как в Python-версии:
+- data/train/pretrain_part_1.parquet, pretrain_part_2.parquet, pretrain_part_3.parquet;
+- data/train/train_part_1.parquet, train_part_2.parquet, train_part_3.parquet;
+- data/train_labels.parquet;
+- выход: каталог output/ в корне репозитория.
 
-  Конфиг:
-    training/config.py
-      VAL_RATIO    — доля выборки под валидацию (например 0.2)
-      RANDOM_SEED  — seed для разбиения
-      CATBOOST_PARAMS, XGB_PARAMS, LGBM_PARAMS, PYTORCH_PARAMS
+Основные моменты логики build_dataset.cpp:
+- читает train_labels.parquet, строит event_id → target;
+- по pretrain_part_*.parquet строит оконные агрегаты по пользователям (WindowedAggregates + UserAggregates), хранящие только последние WINDOW_TRANSACTIONS=150 транзакций в виде окон;
+- по train_part_*.parquet:
+  - для каждой строки по customer_id берёт текущие агрегаты (последнее окно);
+  - считает те же фичи, что и Python-версия (порт compute_features из shared/features.py в функцию compute_features_cpp);
+  - задаёт target:
+    - если event_id есть в labels → target=1,
+    - иначе target=0;
+  - задаёт sample_weight по тем же правилам WEIGHT_UNLABELED / WEIGHT_LABELED_0 / WEIGHT_LABELED_1;
+  - аккумулирует строки в колоночном виде (все признаки + event_id + target + sample_weight + event_dttm);
+  - побатчево пишет результат в parquet-файлы вида:
+    - output/train_dataset_part_0.parquet,
+    - output/train_dataset_part_1.parquet,
+    - …
+- таким образом, итоговый датасет получается разбитым на несколько parquet-частей.
 
-  Когда запускать:
-    После каждого изменения параметров модели или разбиения. Датасет пересчитывать
-    не нужно — переобучение идёт по уже сохранённому parquet.
+Сборка и запуск C++-версии зависят от установленного окружения (см. requirements/environment_cpp.yml), но общий сценарий:
+1) Собрать бинарник (через CMake или аналогичный скрипт, используя Arrow + Parquet + OpenSSL).
+2) Запустить его из корня репозитория:
+   - рабочий каталог должен быть корнем (там ожидается папка data/ и создаётся папка output/).
 
+Если вы хотите использовать C++-датасет в стандартном Python-тренере (training/main.py), нужно:
+- либо объединить все output/train_dataset_part_*.parquet в один файл output/train_dataset.parquet (например, через pandas/pyarrow),
+- либо адаптировать training/main.py под чтение нескольких parquet-файлов.
 
---------------------------------------------------------------------------------
-4. МОДУЛЬ submission — файл для сдачи
---------------------------------------------------------------------------------
+ВАЖНО: в проекте, таким образом, есть ДВА способа собрать датасет:
+1) Полностью на Python (dataset/main.py), дающий единый файл output/train_dataset.parquet.
+2) Быстрая C++-сборка (dataset_cpp/build_dataset.cpp), дающая несколько частей output/train_dataset_part_*.parquet.
 
-  Запуск:
-    PYTHONPATH=. python3 submission/main.py [--model catboost|xgboost|lightgbm|pytorch]
+4. ОБУЧЕНИЕ МОДЕЛЕЙ (training/)
 
-  Важно: в shared/config.py должен быть тот же DATASET_MODE, с которым создавался
-  датасет и обучалась модель.
+Все настройки обучения — в training/config.py:
+- VAL_RATIO — доля данных для валидации (остальное — обучение);
+- параметры моделей:
+  - CATBOOST_PARAMS;
+  - XGB_PARAMS;
+  - LGBM_PARAMS;
+  - PYTORCH_PARAMS (архитектура и параметры обучения MLP).
 
-  Что делает:
-    • Загружает выбранную модель из output/.
-    • Строит агрегаты по pretest в том же режиме, что и при обучении:
-      full — полная история; window_50 — только последние WINDOW_TRANSACTIONS.
-    • Проходит по test: для каждой операции считает фичи (в full добавляет
-      transactions_seen — сколько тестовых операций по клиенту уже обработано),
-      получает предсказание модели.
-    • Сохраняет output/submission.csv в формате: event_id, predict.
+Основная точка входа: training/main.py.
 
-  Когда запускать:
-    Только при сдаче решения (после обучения финальной модели).
+Логика:
+1) Загружает датасет output/train_dataset.parquet.
+2) Выделяет набор признаков:
+   - всё, что не входит в {event_id, target, event_dttm, sample_weight}.
+3) Делает временное разбиение на train/val:
+   - сортирует по event_dttm (по возрастанию);
+   - первые (1 − VAL_RATIO) записей идут в train;
+   - последние VAL_RATIO — в val.
+4) Обучает последовательно четыре модели:
+   - CatBoostClassifier;
+   - XGBClassifier;
+   - LGBMClassifier;
+   - PyTorch MLP (training/pytorch_model.py).
+   При обучении учитываются веса примеров sample_weight.
+5) Для каждой модели считает PR-AUC на валидации (sklearn.average_precision_score).
+6) Сохраняет модели в output/:
+   - CatBoost — output/model.cbm;
+   - XGBoost — output/model_xgb.json;
+   - LightGBM — output/model_lgb.txt;
+   - PyTorch — output/model_pytorch.pt.
+7) Печатает сводную таблицу PR-AUC и лучшую модель.
 
+Запуск:
+  PYTHONPATH=. python training/main.py
 
---------------------------------------------------------------------------------
-5. ГДЕ ЧТО МЕНЯТЬ
---------------------------------------------------------------------------------
+5. ПОСТРОЕНИЕ submission.csv (submission/)
 
-  Пути к данным и выходным файлам:
-    shared/config.py
-      DATA_ROOT, TRAIN_LABELS_PATH, PRETRAIN_PATHS, TRAIN_PATHS,
-      PRETEST_PATH, TEST_PATH, OUTPUT_DIR, TRAIN_DATASET_PATH, MODEL_PATH,
-      PREDICTIONS_PATH, BATCH_SIZE.
+Основная точка входа: submission/main.py.
 
-  Режим датасета:
-    shared/config.py
-      DATASET_MODE        — "full" или "window_50"
-      WINDOW_TRANSACTIONS — размер окна для window_50 (по умолчанию 50)
+Аргументы:
+- --model / -m — какую обученную модель использовать:
+  - catboost;
+  - xgboost;
+  - lightgbm;
+  - pytorch.
 
-  Состав и логика фичей:
-    shared/features.py
-      FEATURE_NAMES     — базовый список фичей (используется в window_50)
-      FEATURE_NAMES_FULL — базовые + transactions_seen (используется в full)
-      compute_features(agg, row, transactions_seen=None) — формула каждой фичи.
-    shared/parquet_batch_aggregates.py
-      FEATURE_COLUMNS     — колонки из parquet для агрегации
-      UserAggregates      — агрегаты по полной истории
-      WindowedAggregates  — агрегаты по скользящему окну (режим window_50)
-      build_user_aggregates(), build_windowed_aggregates()
+Логика:
+1) Загружает выбранную модель:
+   - CatBoost из output/model.cbm;
+   - XGBoost из output/model_xgb.json;
+   - LightGBM из output/model_lgb.txt;
+   - PyTorch MLP из output/model_pytorch.pt.
+2) Строит оконные агрегаты по pretest:
+   - через shared.parquet_batch_aggregates.build_windowed_aggregates по файлу data/test/pretest.parquet;
+   - окно по пользователю того же размера WINDOW_TRANSACTIONS, что и при обучении.
+3) По файлу data/test/test.parquet:
+   - построчно:
+     - берёт customer_id, находит оконные агрегаты (если пользователя не было в pretest, создаётся пустое окно);
+     - считает фичи compute_features(agg, row, tr_amount);
+     - обновляет агрегаты текущей строкой;
+     - применяет predict_fn выбранной модели к вектору фичей;
+     - добавляет пару (event_id, predict) в список предсказаний.
+4) Формирует DataFrame с двумя колонками:
+   - event_id;
+   - predict (вещественный логит: значения > 1 — высокая уверенность в целевом классе, < 0 — в нецелевом).
+5) Проверяет, что в предсказаниях ровно 633 683 строк (требование платформы).
+6) Сохраняет результат в output/submission.csv.
 
-  Параметры модели и разбиения:
-    training/config.py
-      VAL_RATIO, RANDOM_SEED, CATBOOST_PARAMS, XGB_PARAMS, LGBM_PARAMS, PYTORCH_PARAMS.
+Запуск (пример):
+  PYTHONPATH=. python submission/main.py --model catboost
+или
+  PYTHONPATH=. python submission/main.py -m lightgbm
 
-  Сменить модель (не из стандартного набора):
-    training/main.py   — добавить/заменить обучение, сохранять веса в output/
-    submission/main.py — загружать и применять ту же модель при предсказании.
+После этого файл output/submission.csv можно загружать на платформу соревнования.
 
+6. ВСПОМОГАТЕЛЬНЫЕ СКРИПТЫ (scripts/)
 
---------------------------------------------------------------------------------
-6. КРАТКИЙ ЧЕКЛИСТ
---------------------------------------------------------------------------------
+scripts/data_transactions_distribution.py
+- проходит по всем parquet-файлам в data/ с колонкой customer_id;
+- для каждого файла:
+  - считает распределение «количество транзакций на пользователя»;
+  - выводит краткую статистику (среднее, медиана, минимум/максимум, квартели);
+  - строит гистограмму и сохраняет её в output/transaction_distribution_plots/.
 
-  Первый запуск или после смены DATASET_MODE / фичей / сырых данных:
-    1) Задать DATASET_MODE (и при необходимости WINDOW_TRANSACTIONS) в shared/config.py
-    2) PYTHONPATH=. python3 dataset/main.py
-    3) PYTHONPATH=. python3 training/main.py
+scripts/feature_target_correlation.py
+- после построения датасета (и при желании обучения CatBoost):
+  - загружает output/train_dataset.parquet;
+  - считает корреляцию каждой фичи с target;
+  - сохраняет таблицу feature_target_correlation.csv;
+  - при наличии output/model.cbm — считает важности фичей CatBoost и сохраняет их;
+  - строит барчарты корреляций и важностей в output/.
 
-  Эксперименты с моделью (фичи и режим не менялись):
-    • Меняешь training/config.py
-    • PYTHONPATH=. python3 training/main.py
+scripts/feature_stats.py
+- сравнивает средние значения фичей на train и test:
+  - train: средние по FEATURE_NAMES из output/train_dataset.parquet;
+  - test: строит агрегаты по pretest и считает фичи по test, затем средние по тем же FEATURE_NAMES;
+- выводит таблицу со средними по train/test и их разностью.
 
-  Сдача:
-    • Убедись, что DATASET_MODE совпадает с тем, с которым обучал модель
-    • PYTHONPATH=. python3 submission/main.py [--model catboost]
-    → отправляешь output/submission.csv
+7. КРАТКО: КАК ПОЛУЧИТЬ submission.csv
 
-================================================================================
+1) Подготовить данные в папке data/ в соответствии с описанной выше структурой (train/, test/, train_labels.parquet).
+2) Собрать обучающий датасет (любой из двух способов):
+   - Способ 1 (Python):
+     - PYTHONPATH=. python dataset/main.py
+     - результат: output/train_dataset.parquet.
+   - Способ 2 (C++):
+     - собрать и запустить бинарник из dataset_cpp/build_dataset.cpp из корня репозитория;
+     - результат: несколько файлов output/train_dataset_part_*.parquet;
+     - при использовании стандартного Python-тренера объединить части в один output/train_dataset.parquet.
+3) Обучить модели:
+   - PYTHONPATH=. python training/main.py
+   - на выходе будут сохранены все модели в output/.
+4) Построить предсказания и файл для отправки:
+   - PYTHONPATH=. python submission/main.py --model catboost
+   - результат: output/submission.csv с колонками event_id, predict и ровно 633 683 строками.
+
+Эта последовательность действий полностью воспроизводит логику кода репозитория и даёт готовый файл submission.csv для загрузки на платформу соревнования.
+

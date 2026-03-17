@@ -1,0 +1,11 @@
+name: guard-cpp
+channels:
+  - defaults
+dependencies:
+  - cmake
+  - compilers
+  - openssl
+  - ninja
+  - arrow-cpp
+  - parquet-cpp
+prefix: /home/timofey/miniconda3/envs/guard-cpp
