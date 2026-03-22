@@ -4,6 +4,7 @@ channels:
 dependencies:
   - python=3.10
   - pandas
+  - numpy
   - xgboost
   - scikit-learn
   - catboost

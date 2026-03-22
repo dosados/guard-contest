@@ -1,7 +1,7 @@
 {
 	"InstallScripts" : 
 	[
-		"/home/timofey/Documents/own/guard-contest/dataset_cpp/build/cmake_install.cmake"
+		"/home/mants/Documents/own/guard-contest/dataset_cpp/build/cmake_install.cmake"
 	],
 	"Parallel" : false
 }

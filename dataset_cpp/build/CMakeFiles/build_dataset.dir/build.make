@@ -44,19 +44,19 @@ cmake_force:
 SHELL = /bin/sh
 
 # The CMake executable.
-CMAKE_COMMAND = /home/timofey/miniconda3/envs/guard-cpp/bin/cmake
+CMAKE_COMMAND = /home/mants/miniconda3/envs/guard-cpp/bin/cmake
 
 # The command to remove a file.
-RM = /home/timofey/miniconda3/envs/guard-cpp/bin/cmake -E rm -f
+RM = /home/mants/miniconda3/envs/guard-cpp/bin/cmake -E rm -f
 
 # Escaping for special characters.
 EQUALS = =
 
 # The top-level source directory on which CMake was run.
-CMAKE_SOURCE_DIR = /home/timofey/Documents/own/guard-contest/dataset_cpp
+CMAKE_SOURCE_DIR = /home/mants/Documents/own/guard-contest/dataset_cpp
 
 # The top-level build directory on which CMake was run.
-CMAKE_BINARY_DIR = /home/timofey/Documents/own/guard-contest/dataset_cpp/build
+CMAKE_BINARY_DIR = /home/mants/Documents/own/guard-contest/dataset_cpp/build
 
 # Include any dependencies generated for this target.
 include CMakeFiles/build_dataset.dir/depend.make
@@ -73,18 +73,18 @@ CMakeFiles/build_dataset.dir/codegen:
 .PHONY : CMakeFiles/build_dataset.dir/codegen
 
 CMakeFiles/build_dataset.dir/build_dataset.cpp.o: CMakeFiles/build_dataset.dir/flags.make
-CMakeFiles/build_dataset.dir/build_dataset.cpp.o: /home/timofey/Documents/own/guard-contest/dataset_cpp/build_dataset.cpp
+CMakeFiles/build_dataset.dir/build_dataset.cpp.o: /home/mants/Documents/own/guard-contest/dataset_cpp/build_dataset.cpp
 CMakeFiles/build_dataset.dir/build_dataset.cpp.o: CMakeFiles/build_dataset.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/timofey/Documents/own/guard-contest/dataset_cpp/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_1) "Building CXX object CMakeFiles/build_dataset.dir/build_dataset.cpp.o"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/build_dataset.dir/build_dataset.cpp.o -MF CMakeFiles/build_dataset.dir/build_dataset.cpp.o.d -o CMakeFiles/build_dataset.dir/build_dataset.cpp.o -c /home/timofey/Documents/own/guard-contest/dataset_cpp/build_dataset.cpp
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/mants/Documents/own/guard-contest/dataset_cpp/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_1) "Building CXX object CMakeFiles/build_dataset.dir/build_dataset.cpp.o"
+	/home/mants/miniconda3/envs/guard-cpp/bin/x86_64-conda-linux-gnu-c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/build_dataset.dir/build_dataset.cpp.o -MF CMakeFiles/build_dataset.dir/build_dataset.cpp.o.d -o CMakeFiles/build_dataset.dir/build_dataset.cpp.o -c /home/mants/Documents/own/guard-contest/dataset_cpp/build_dataset.cpp
 
 CMakeFiles/build_dataset.dir/build_dataset.cpp.i: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/build_dataset.dir/build_dataset.cpp.i"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/timofey/Documents/own/guard-contest/dataset_cpp/build_dataset.cpp > CMakeFiles/build_dataset.dir/build_dataset.cpp.i
+	/home/mants/miniconda3/envs/guard-cpp/bin/x86_64-conda-linux-gnu-c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/mants/Documents/own/guard-contest/dataset_cpp/build_dataset.cpp > CMakeFiles/build_dataset.dir/build_dataset.cpp.i
 
 CMakeFiles/build_dataset.dir/build_dataset.cpp.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/build_dataset.dir/build_dataset.cpp.s"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/timofey/Documents/own/guard-contest/dataset_cpp/build_dataset.cpp -o CMakeFiles/build_dataset.dir/build_dataset.cpp.s
+	/home/mants/miniconda3/envs/guard-cpp/bin/x86_64-conda-linux-gnu-c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/mants/Documents/own/guard-contest/dataset_cpp/build_dataset.cpp -o CMakeFiles/build_dataset.dir/build_dataset.cpp.s
 
 # Object files for target build_dataset
 build_dataset_OBJECTS = \
@@ -96,11 +96,11 @@ build_dataset_EXTERNAL_OBJECTS =
 build_dataset: CMakeFiles/build_dataset.dir/build_dataset.cpp.o
 build_dataset: CMakeFiles/build_dataset.dir/build.make
 build_dataset: CMakeFiles/build_dataset.dir/compiler_depend.ts
-build_dataset: /home/timofey/miniconda3/envs/guard-contest/lib/libparquet.so.2300.1.0
-build_dataset: /home/timofey/miniconda3/envs/guard-contest/lib/libcrypto.so
-build_dataset: /home/timofey/miniconda3/envs/guard-contest/lib/libarrow.so.2300.1.0
+build_dataset: /home/mants/miniconda3/envs/guard-cpp/lib/libparquet.so.2300.1.0
+build_dataset: /home/mants/miniconda3/envs/guard-cpp/lib/libcrypto.so
+build_dataset: /home/mants/miniconda3/envs/guard-cpp/lib/libarrow.so.2300.1.0
 build_dataset: CMakeFiles/build_dataset.dir/link.txt
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/timofey/Documents/own/guard-contest/dataset_cpp/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Linking CXX executable build_dataset"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/mants/Documents/own/guard-contest/dataset_cpp/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Linking CXX executable build_dataset"
 	$(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/build_dataset.dir/link.txt --verbose=$(VERBOSE)
 
 # Rule to build all files generated by this target.
@@ -112,6 +112,6 @@ CMakeFiles/build_dataset.dir/clean:
 .PHONY : CMakeFiles/build_dataset.dir/clean
 
 CMakeFiles/build_dataset.dir/depend:
-	cd /home/timofey/Documents/own/guard-contest/dataset_cpp/build && $(CMAKE_COMMAND) -E cmake_depends "Unix Makefiles" /home/timofey/Documents/own/guard-contest/dataset_cpp /home/timofey/Documents/own/guard-contest/dataset_cpp /home/timofey/Documents/own/guard-contest/dataset_cpp/build /home/timofey/Documents/own/guard-contest/dataset_cpp/build /home/timofey/Documents/own/guard-contest/dataset_cpp/build/CMakeFiles/build_dataset.dir/DependInfo.cmake "--color=$(COLOR)" build_dataset
+	cd /home/mants/Documents/own/guard-contest/dataset_cpp/build && $(CMAKE_COMMAND) -E cmake_depends "Unix Makefiles" /home/mants/Documents/own/guard-contest/dataset_cpp /home/mants/Documents/own/guard-contest/dataset_cpp /home/mants/Documents/own/guard-contest/dataset_cpp/build /home/mants/Documents/own/guard-contest/dataset_cpp/build /home/mants/Documents/own/guard-contest/dataset_cpp/build/CMakeFiles/build_dataset.dir/DependInfo.cmake "--color=$(COLOR)" build_dataset
 .PHONY : CMakeFiles/build_dataset.dir/depend
 

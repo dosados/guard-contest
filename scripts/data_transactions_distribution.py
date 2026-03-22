@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
@@ -17,8 +18,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
+from tqdm import tqdm
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+logger = logging.getLogger(__name__)
 DATA_ROOT = PROJECT_ROOT / "data"
 CUSTOMER_ID_COLUMN = "customer_id"
 BATCH_SIZE = 500_000
@@ -39,27 +42,36 @@ def count_transactions_per_user(path: Path) -> list[int]:
     """Читает parquet побатчево по customer_id, возвращает список «транзакций на пользователя»."""
     file_ = pq.ParquetFile(path)
     user_counts: dict[int, int] = {}
-    for batch in file_.iter_batches(columns=[CUSTOMER_ID_COLUMN], batch_size=BATCH_SIZE):
-        df = batch.to_pandas()
-        vc = df[CUSTOMER_ID_COLUMN].value_counts()
-        for uid, cnt in vc.items():
-            if pd.isna(uid):
-                continue
-            user_counts[int(uid)] = user_counts.get(int(uid), 0) + cnt
+    nrows = int(file_.metadata.num_rows)
+    with tqdm(total=nrows, desc=f"read {path.name}", unit="row", leave=False) as pbar:
+        for batch in file_.iter_batches(columns=[CUSTOMER_ID_COLUMN], batch_size=BATCH_SIZE):
+            df = batch.to_pandas()
+            vc = df[CUSTOMER_ID_COLUMN].value_counts()
+            for uid, cnt in vc.items():
+                if pd.isna(uid):
+                    continue
+                user_counts[int(uid)] = user_counts.get(int(uid), 0) + cnt
+            pbar.update(batch.num_rows)
     return list(user_counts.values())
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
     if not DATA_ROOT.is_dir():
-        print(f"Каталог данных не найден: {DATA_ROOT}", file=sys.stderr)
+        logger.error("Каталог данных не найден: %s", DATA_ROOT)
         sys.exit(1)
 
     paths = collect_parquet_paths(DATA_ROOT)
     if not paths:
-        print("Parquet-файлы в data/ не найдены.", file=sys.stderr)
+        logger.warning("Parquet-файлы в data/ не найдены.")
         sys.exit(0)
 
-    for path in paths:
+    logger.info("Найдено parquet-файлов: %d", len(paths))
+    for path in tqdm(paths, desc="parquet files", unit="file"):
         if not schema_has_column(path, CUSTOMER_ID_COLUMN):
             continue
 
@@ -71,11 +83,18 @@ def main() -> None:
         rel = path.relative_to(PROJECT_ROOT)
 
         # Короткая статистика
-        print(f"{rel}")
-        print(f"  среднее: {np.mean(arr):.2f}  медиана: {np.median(arr):.2f}")
-        print(f"  мин: {int(np.min(arr))}  макс: {int(np.max(arr))}")
-        print(f"  Q1: {np.percentile(arr, 25):.2f}  Q3: {np.percentile(arr, 75):.2f}")
-        print()
+        logger.info("%s", rel)
+        logger.info(
+            "  среднее: %.2f  медиана: %.2f",
+            float(np.mean(arr)),
+            float(np.median(arr)),
+        )
+        logger.info("  мин: %d  макс: %d", int(np.min(arr)), int(np.max(arr)))
+        logger.info(
+            "  Q1: %.2f  Q3: %.2f",
+            float(np.percentile(arr, 25)),
+            float(np.percentile(arr, 75)),
+        )
 
         # Одна гистограмма: все данные, бины объединяют диапазон значений
         for style in ("seaborn-v0_8-whitegrid", "seaborn-whitegrid", "ggplot"):

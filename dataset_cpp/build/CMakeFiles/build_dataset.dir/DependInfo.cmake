@@ -8,7 +8,7 @@ set(CMAKE_DEPENDS_LANGUAGES
 
 # The set of dependency files which are needed:
 set(CMAKE_DEPENDS_DEPENDENCY_FILES
-  "/home/timofey/Documents/own/guard-contest/dataset_cpp/build_dataset.cpp" "CMakeFiles/build_dataset.dir/build_dataset.cpp.o" "gcc" "CMakeFiles/build_dataset.dir/build_dataset.cpp.o.d"
+  "/home/mants/Documents/own/guard-contest/dataset_cpp/build_dataset.cpp" "CMakeFiles/build_dataset.dir/build_dataset.cpp.o" "gcc" "CMakeFiles/build_dataset.dir/build_dataset.cpp.o.d"
   "" "build_dataset" "gcc" "CMakeFiles/build_dataset.dir/link.d"
   )
 

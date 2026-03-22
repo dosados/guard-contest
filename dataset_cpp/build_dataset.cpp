@@ -1,895 +1,877 @@
+// Сборка обучающего датасета: Arrow + Parquet + OpenSSL (MD5).
+// Train: каждая строка с непустым customer_id → строка в датасет → update окна.
+// target = 1 если event_id в train_labels.parquet, иначе 0.
+// Запуск из корня репозитория: ./build_dataset [repo_root]
+
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
+#include <openssl/evp.h>
+#include <openssl/md5.h>
+
 #include <arrow/api.h>
 #include <arrow/io/api.h>
 #include <parquet/arrow/reader.h>
 #include <parquet/arrow/writer.h>
+#include <parquet/metadata.h>
 
-#include <openssl/md5.h>
-
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <ctime>
 #include <deque>
 #include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <limits>
-#include <map>
 #include <optional>
-#include <set>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
-#include <utility>
+#include <unordered_set>
 #include <vector>
-#include <algorithm>
-#include <iomanip>
-#include <sstream>
 
-namespace fs = std::filesystem;
+constexpr int kWindowMax = 150;
+constexpr int kOutBatch = 131072;
+constexpr double kWeightUnlabeled = 1.0;
+constexpr double kWeightLabeled0 = 2.0;
+constexpr double kWeightLabeled1 = 5.0;
+constexpr double kEps = 1e-9;
 
-// -------- Константы и имена колонок (как в Python) -------------------
+static void log_msg(const std::string& s) { std::cerr << "[build_dataset] " << s << "\n"; }
 
-static const std::string AMOUNT_COLUMN = "operaton_amt";
-static const std::string CUSTOMER_ID_COLUMN = "customer_id";
-static const std::string EVENT_DTTM_COLUMN = "event_dttm";
-static const std::string EVENT_ID_COLUMN = "event_id";
-static const std::string OPERATING_SYSTEM_TYPE = "operating_system_type";
-static const std::string DEVICE_SYSTEM_VERSION = "device_system_version";
-static const std::string MCC_CODE = "mcc_code";
-static const std::string CHANNEL_INDICATOR_TYPE = "channel_indicator_type";
-static const std::string CHANNEL_INDICATOR_SUB_TYPE = "channel_indicator_sub_type";
-static const std::string TIMEZONE_COLUMN = "timezone";
-static const std::string COMPROMISED_COLUMN = "compromised";
-static const std::string WEB_RDP_CONNECTION = "web_rdp_connection";
-static const std::string PHONE_VOIP_CALL_STATE = "phone_voip_call_state";
-static const std::string SESSION_ID_COLUMN = "session_id";
-static const std::string BROWSER_LANGUAGE_COLUMN = "browser_language";
-static const std::string EVENT_DESCR_COLUMN = "event_descr";
-static const std::string EVENT_DESC_COLUMN = "event_desc";
+static std::string path_basename(const std::string& p) {
+  auto pos = p.find_last_of("/\\");
+  if (pos == std::string::npos) return p;
+  return p.substr(pos + 1);
+}
 
-static const std::vector<std::string> FEATURE_COLUMNS = {
-    CUSTOMER_ID_COLUMN,
-    AMOUNT_COLUMN,
-    EVENT_DTTM_COLUMN,
-    EVENT_DESCR_COLUMN,
-    EVENT_DESC_COLUMN,
-    OPERATING_SYSTEM_TYPE,
-    DEVICE_SYSTEM_VERSION,
-    MCC_CODE,
-    CHANNEL_INDICATOR_TYPE,
-    CHANNEL_INDICATOR_SUB_TYPE,
-    TIMEZONE_COLUMN,
-    COMPROMISED_COLUMN,
-    WEB_RDP_CONNECTION,
-    PHONE_VOIP_CALL_STATE,
-    SESSION_ID_COLUMN,
-    BROWSER_LANGUAGE_COLUMN,
+/** Текстовая шкала прогресса по строкам одного parquet (stderr, одна строка с \\r). */
+static void render_row_progress(int64_t done, int64_t total, const std::string& file_tag) {
+  constexpr int kBarW = 40;
+  std::cerr << "\r[build_dataset] [";
+  if (total > 0) {
+    int filled = static_cast<int>(kBarW * done / total);
+    if (filled > kBarW) filled = kBarW;
+    int pct = static_cast<int>(100 * done / total);
+    if (pct > 100) pct = 100;
+    for (int i = 0; i < kBarW; ++i) std::cerr << (i < filled ? '#' : '.');
+    std::cerr << "] " << std::setw(3) << pct << "%  " << file_tag << "  rows " << done << "/" << total;
+  } else {
+    for (int i = 0; i < kBarW; ++i) std::cerr << '.';
+    std::cerr << "   " << file_tag << "  rows " << done;
+  }
+  std::cerr << "\033[K" << std::flush;
+}
+
+static const char* kFeatureNames[] = {
+    "operation_amt",          "amount_to_median",       "amount_zscore",
+    "is_amount_high",         "transactions_last_1h",   "transactions_last_24h",
+    "sum_amount_last_1h",     "max_amount_last_24h",    "device_freq",
+    "device_count",           "time_since_last_device", "mcc_freq",
+    "mcc_count",              "time_since_last_mcc",    "channel_freq",
+    "channel_count",          "time_since_last_channel","timezone_freq",
+    "browser_language_freq",
+    "is_compromised_device",  "web_rdp_connection",     "phone_voip_call_state",
+    "hour",                   "day_of_week",            "is_night_transaction",
+    "is_weekend",             "transactions_last_10m",  "sum_amount_last_24h",
+    "time_since_prev_transaction", "transactions_in_session",
+    "timezone_missing",       "tr_amount",              "event_descr",
+    "mcc_code",               "event_descr_freq",       "event_type_nm_freq",
+    "log_tr_amount",          "transactions_last_10m_norm", "transactions_last_1h_norm",
+    "transactions_last_24h_norm", "sum_amount_last_1h_norm", "sum_amount_last_24h_norm",
+    "transactions_last_10m_to_1h", "transactions_last_1h_to_24h", "sum_1h_to_24h",
+    "time_since_2nd_prev_transaction", "mean_time_between_tx", "std_time_between_tx",
+    "amount_to_last_amount",  "amount_to_max_24h",      "time_since_prev_to_mean_gap",
+    "device_freq_alt",        "mcc_freq_alt"};
+constexpr int kNumFeatures = sizeof(kFeatureNames) / sizeof(kFeatureNames[0]);
+
+struct Txn {
+  std::optional<double> amount;
+  std::optional<std::chrono::system_clock::time_point> dttm;
+  int hour_val = -1;
+  int dow_py = -1;
+  std::string os_type;
+  std::string dev_ver;
+  std::string mcc;
+  std::string ch_type;
+  std::string ch_sub;
+  std::string tz;
+  std::string compromised;
+  std::string web_rdp;
+  std::string voip;
+  std::string session_id;
+  std::string browser_language;
+  std::string event_type_nm;
+  std::string event_descr;
 };
 
-static const int WINDOW_TRANSACTIONS = 150;
-static const int WINDOWED_BATCH_SIZE = 30000;
-
-static constexpr double WEIGHT_UNLABELED = 1.0;
-static constexpr double WEIGHT_LABELED_0 = 2.0;
-static constexpr double WEIGHT_LABELED_1 = 3.0;
-
-// FEATURE_NAMES (из shared/features.py)
-static const std::vector<std::string> FEATURE_NAMES = {
-    "operation_amt",
-    "amount_to_median",
-    "amount_zscore",
-    "is_amount_high",
-    "transactions_last_1h",
-    "transactions_last_24h",
-    "sum_amount_last_1h",
-    "max_amount_last_24h",
-    "is_new_device",
-    "is_new_mcc",
-    "is_new_channel",
-    "is_new_timezone",
-    "is_compromised_device",
-    "web_rdp_connection",
-    "phone_voip_call_state",
-    "hour",
-    "day_of_week",
-    "is_night_transaction",
-    "is_weekend",
-    "transactions_last_10m",
-    "sum_amount_last_24h",
-    "time_since_prev_transaction",
-    "is_new_browser_language",
-    "transactions_in_session",
-    "timezone_missing",
-    "tr_amount",
-    "event_descr",
-    "mcc_code",
+struct UserWindow {
+  std::deque<Txn> dq;
+  void push(const Txn& t) {
+    dq.push_back(t);
+    while (static_cast<int>(dq.size()) > kWindowMax) dq.pop_front();
+  }
+  int count() const { return static_cast<int>(dq.size()); }
 };
 
-static const std::string TARGET_COLUMN = "target";
-static const std::string WEIGHT_COLUMN = "sample_weight";
+static std::string trim_copy(std::string s) {
+  while (!s.empty() && (s.front() == ' ' || s.front() == '\t')) s.erase(s.begin());
+  while (!s.empty() && (s.back() == ' ' || s.back() == '\t')) s.pop_back();
+  return s;
+}
 
-// Максимальный размер одного батча (примерно, по числу строк датасета),
-// чтобы не держать в памяти весь train сразу.
-static const int64_t MAX_BATCH_ROWS = 2'000'000;
+static double cat_from_utf8(const std::string& s) {
+  std::string t = trim_copy(s);
+  if (t.empty()) return 0.0;
+  unsigned char digest[EVP_MAX_MD_SIZE];
+  unsigned int diglen = 0;
+  EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+  if (!ctx) return 0.0;
+  if (EVP_DigestInit_ex(ctx, EVP_md5(), nullptr) != 1 || EVP_DigestUpdate(ctx, t.data(), t.size()) != 1 ||
+      EVP_DigestFinal_ex(ctx, digest, &diglen) != 1 || diglen != MD5_DIGEST_LENGTH) {
+    EVP_MD_CTX_free(ctx);
+    return 0.0;
+  }
+  EVP_MD_CTX_free(ctx);
+  long long rem = 0;
+  for (unsigned int i = 0; i < diglen; ++i) {
+    rem = (rem * 256 + static_cast<long long>(digest[i])) % 1000000LL;
+  }
+  return static_cast<double>(rem);
+}
 
-// ----------------------- Хелперы для прогресса ------------------------
+static std::optional<double> parse_double_any(const std::string& s) {
+  std::string t = trim_copy(s);
+  if (t.empty()) return std::nullopt;
+  char* end = nullptr;
+  double v = std::strtod(t.c_str(), &end);
+  if (end == t.c_str()) return std::nullopt;
+  if (!std::isfinite(v)) return std::nullopt;
+  return v;
+}
 
-std::string format_seconds(double seconds) {
-    if (seconds < 0) seconds = 0;
-    auto total = static_cast<long long>(seconds + 0.5);
-    long long h = total / 3600;
-    long long m = (total % 3600) / 60;
-    long long s = total % 60;
-    std::ostringstream oss;
-    if (h > 0) {
-        oss << h << "h " << std::setw(2) << std::setfill('0') << m << "m";
-    } else if (m > 0) {
-        oss << m << "m " << std::setw(2) << std::setfill('0') << s << "s";
+// Наивное локальное время, как pandas / strptime без таймзоны
+static bool parse_dttm_fields(const std::string& s_in, std::tm* out_tm) {
+  std::string t = trim_copy(s_in);
+  if (t.empty()) return false;
+  // Обрезаем доли секунды (как в Python strptime с .%f)
+  if (t.size() > 19 && t[19] == '.') t.resize(19);
+  std::memset(out_tm, 0, sizeof(std::tm));
+  const char* r = strptime(t.c_str(), "%Y-%m-%d %H:%M:%S", out_tm);
+  if (r == nullptr) return false;
+  out_tm->tm_isdst = -1;
+  return true;
+}
+
+static std::optional<std::chrono::system_clock::time_point> dttm_from_tm(std::tm tm) {
+  time_t tt = mktime(&tm);
+  if (tt == static_cast<time_t>(-1)) return std::nullopt;
+  return std::chrono::system_clock::from_time_t(tt);
+}
+
+static void fill_txn_time(Txn& t, const std::string& dttm_s) {
+  std::tm tm = {};
+  if (!parse_dttm_fields(dttm_s, &tm)) return;
+  t.hour_val = tm.tm_hour;
+  t.dow_py = (tm.tm_wday + 6) % 7;
+  if (auto tp = dttm_from_tm(tm)) t.dttm = tp;
+}
+
+static bool empty_field(const std::string& s) { return trim_copy(s).empty(); }
+
+static std::string col_get_str(const arrow::Array& col, int64_t row) {
+  if (col.IsNull(row)) return {};
+  switch (col.type_id()) {
+    case arrow::Type::STRING: {
+      auto& a = static_cast<const arrow::StringArray&>(col);
+      return a.GetString(row);
+    }
+    case arrow::Type::LARGE_STRING: {
+      auto& a = static_cast<const arrow::LargeStringArray&>(col);
+      return a.GetString(row);
+    }
+    case arrow::Type::INT64: {
+      auto& a = static_cast<const arrow::Int64Array&>(col);
+      return std::to_string(a.Value(row));
+    }
+    case arrow::Type::INT32: {
+      auto& a = static_cast<const arrow::Int32Array&>(col);
+      return std::to_string(a.Value(row));
+    }
+    default:
+      return {};
+  }
+}
+
+static std::optional<int64_t> col_get_int64(const arrow::Array& col, int64_t row) {
+  if (col.IsNull(row)) return std::nullopt;
+  if (col.type_id() == arrow::Type::INT64) {
+    return static_cast<const arrow::Int64Array&>(col).Value(row);
+  }
+  if (col.type_id() == arrow::Type::INT32) {
+    return static_cast<int64_t>(static_cast<const arrow::Int32Array&>(col).Value(row));
+  }
+  auto s = col_get_str(col, row);
+  if (s.empty()) return std::nullopt;
+  try {
+    return std::stoll(s);
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
+static int col_index(const arrow::Schema& sch, const std::string& name) {
+  auto f = sch.GetFieldByName(name);
+  if (!f) return -1;
+  return sch.GetFieldIndex(name);
+}
+
+static Txn row_to_txn(const arrow::RecordBatch& batch, int64_t i, const arrow::Schema& sch) {
+  auto get_s = [&](const char* n) -> std::string {
+    int idx = col_index(sch, n);
+    if (idx < 0) return {};
+    return col_get_str(*batch.column(idx), i);
+  };
+  Txn t;
+  std::string amt_s = get_s("operaton_amt");
+  if (!amt_s.empty()) t.amount = parse_double_any(amt_s);
+  std::string dt = get_s("event_dttm");
+  if (!dt.empty()) fill_txn_time(t, dt);
+  t.os_type = get_s("operating_system_type");
+  t.dev_ver = get_s("device_system_version");
+  t.mcc = get_s("mcc_code");
+  t.ch_type = get_s("channel_indicator_type");
+  t.ch_sub = get_s("channel_indicator_sub_type");
+  if (t.ch_sub.empty()) t.ch_sub = get_s("channel_indicator_subtype");
+  t.tz = get_s("timezone");
+  t.compromised = get_s("compromised");
+  t.web_rdp = get_s("web_rdp_connection");
+  t.voip = get_s("phone_voip_call_state");
+  t.session_id = get_s("session_id");
+  t.browser_language = get_s("browser_language");
+  t.event_type_nm = get_s("event_type_nm");
+  t.event_descr = get_s("event_descr");
+  if (t.event_descr.empty()) t.event_descr = get_s("event_desc");
+  return t;
+}
+
+struct FeatureRow {
+  std::array<double, kNumFeatures> f{};
+  int64_t event_id = 0;
+  int32_t target = 0;
+  double sample_weight = 1.0;
+  std::string event_dttm_raw;
+};
+
+static double nan_val() { return std::numeric_limits<double>::quiet_NaN(); }
+
+static FeatureRow compute_features(const UserWindow& w, const arrow::RecordBatch& batch, int64_t i,
+                                 const arrow::Schema& sch,
+                                 const std::unordered_map<int64_t, int>& labels_orig) {
+  FeatureRow out;
+  std::vector<double> amounts;
+  amounts.reserve(w.dq.size());
+  for (const auto& t : w.dq) {
+    if (t.amount.has_value() && std::isfinite(*t.amount)) amounts.push_back(*t.amount);
+  }
+  size_t n_amt = amounts.size();
+  double median = nan_val();
+  double p95 = nan_val();
+  double mean = nan_val();
+  double stdv = nan_val();
+  if (n_amt > 0) {
+    std::vector<double> sorted = amounts;
+    std::sort(sorted.begin(), sorted.end());
+    if (n_amt % 2 == 1) {
+      median = sorted[n_amt / 2];
     } else {
-        oss << s << "s";
+      median = (sorted[n_amt / 2 - 1] + sorted[n_amt / 2]) / 2.0;
     }
-    return oss.str();
+    size_t idx95 = static_cast<size_t>(std::floor(0.95 * static_cast<double>(n_amt - 1)));
+    std::nth_element(sorted.begin(), sorted.begin() + idx95, sorted.end());
+    p95 = sorted[idx95];
+    double s = 0.0;
+    for (double a : amounts) s += a;
+    mean = s / static_cast<double>(n_amt);
+    if (n_amt >= 2) {
+      double sq = 0.0;
+      for (double a : amounts) {
+        double d = a - mean;
+        sq += d * d;
+      }
+      stdv = std::sqrt(std::max(0.0, sq / static_cast<double>(n_amt - 1)));
+    }
+  }
+
+  auto get_row_s = [&](const char* n) -> std::string {
+    int idx = col_index(sch, n);
+    if (idx < 0) return {};
+    return col_get_str(*batch.column(idx), i);
+  };
+
+  std::string amt_cur_s = get_row_s("operaton_amt");
+  double amount = nan_val();
+  if (auto p = parse_double_any(amt_cur_s)) amount = *p;
+
+  std::string dttm_s = get_row_s("event_dttm");
+  out.event_dttm_raw = dttm_s;
+  Txn cur_tmp;
+  if (!dttm_s.empty()) fill_txn_time(cur_tmp, dttm_s);
+  std::optional<std::chrono::system_clock::time_point> dttm = cur_tmp.dttm;
+  int hour_val = cur_tmp.hour_val;
+  int dow_val = cur_tmp.dow_py;
+
+  using clock = std::chrono::system_clock;
+  struct TA {
+    clock::time_point t;
+    double a;
+  };
+  std::vector<TA> recent;
+  if (dttm.has_value()) {
+    auto t0 = *dttm - std::chrono::hours(24);
+    for (const auto& t : w.dq) {
+      if (t.dttm.has_value() && *t.dttm >= t0 && t.amount.has_value() && std::isfinite(*t.amount)) {
+        recent.push_back({*t.dttm, *t.amount});
+      }
+    }
+  }
+
+  auto count_since = [&](std::chrono::seconds delta) -> int {
+    if (!dttm.has_value()) return 0;
+    auto thr = *dttm - delta;
+    int c = 0;
+    for (const auto& p : recent)
+      if (p.t >= thr) ++c;
+    return c;
+  };
+  auto sum_since = [&](std::chrono::seconds delta) -> double {
+    if (!dttm.has_value()) return 0.0;
+    auto thr = *dttm - delta;
+    double s = 0.0;
+    for (const auto& p : recent)
+      if (p.t >= thr) s += p.a;
+    return s;
+  };
+  double max24 = nan_val();
+  if (!recent.empty()) {
+    max24 = recent[0].a;
+    for (const auto& p : recent) max24 = std::max(max24, p.a);
+  }
+
+  std::optional<clock::time_point> last_ev;
+  std::optional<clock::time_point> second_last_ev;
+  for (auto it = w.dq.rbegin(); it != w.dq.rend(); ++it) {
+    if (it->dttm.has_value()) {
+      if (!last_ev.has_value()) {
+        last_ev = it->dttm;
+      } else {
+        second_last_ev = it->dttm;
+        break;
+      }
+    }
+  }
+
+  std::unordered_map<std::string, int> dev_cnt, mcc_cnt, ch_cnt, tz_cnt, bl_cnt, descr_cnt, type_cnt;
+  std::unordered_map<std::string, clock::time_point> last_seen_dev, last_seen_mcc, last_seen_ch;
+  std::unordered_map<std::string, int> sess_cnt;
+  std::vector<double> gap_seconds;
+  std::optional<clock::time_point> prev_t_for_gap;
+  double last_amount_in_window = nan_val();
+  for (const auto& t : w.dq) {
+    std::string dkey = t.os_type + "\x1f" + t.dev_ver;
+    std::string ckey = t.ch_type + "\x1f" + t.ch_sub;
+    if (!empty_field(t.os_type) || !empty_field(t.dev_ver)) dev_cnt[dkey]++;
+    if (!empty_field(t.mcc)) mcc_cnt[t.mcc]++;
+    if (!empty_field(t.ch_type) || !empty_field(t.ch_sub)) ch_cnt[ckey]++;
+    if (!empty_field(t.tz)) tz_cnt[t.tz]++;
+    if (!empty_field(t.browser_language)) bl_cnt[t.browser_language]++;
+    if (!empty_field(t.event_descr)) descr_cnt[t.event_descr]++;
+    if (!empty_field(t.event_type_nm)) type_cnt[t.event_type_nm]++;
+
+    if (t.dttm.has_value()) {
+      if (!empty_field(t.os_type) || !empty_field(t.dev_ver)) last_seen_dev[dkey] = *t.dttm;
+      if (!empty_field(t.mcc)) last_seen_mcc[t.mcc] = *t.dttm;
+      if (!empty_field(t.ch_type) || !empty_field(t.ch_sub)) last_seen_ch[ckey] = *t.dttm;
+      if (prev_t_for_gap.has_value()) {
+        double ds = static_cast<double>(std::chrono::duration_cast<std::chrono::seconds>(*t.dttm - *prev_t_for_gap).count());
+        if (std::isfinite(ds) && ds >= 0.0) gap_seconds.push_back(ds);
+      }
+      prev_t_for_gap = t.dttm;
+    }
+    if (t.amount.has_value() && std::isfinite(*t.amount)) last_amount_in_window = *t.amount;
+    if (!t.session_id.empty()) sess_cnt[t.session_id]++;
+  }
+
+  std::string os_c = get_row_s("operating_system_type");
+  std::string dev_c = get_row_s("device_system_version");
+  std::string mcc_c = get_row_s("mcc_code");
+  std::string ch_t = get_row_s("channel_indicator_type");
+  std::string ch_s = get_row_s("channel_indicator_sub_type");
+  if (ch_s.empty()) ch_s = get_row_s("channel_indicator_subtype");
+  std::string tz_c = get_row_s("timezone");
+  std::string bl_c = get_row_s("browser_language");
+  std::string sid_c = get_row_s("session_id");
+  std::string etype_c = get_row_s("event_type_nm");
+  std::string descr = get_row_s("event_descr");
+  if (descr.empty()) descr = get_row_s("event_desc");
+
+  std::string dkey_c = os_c + "\x1f" + dev_c;
+  std::string ckey_c = ch_t + "\x1f" + ch_s;
+  double tx_total = static_cast<double>(w.count());
+  auto safe_ratio = [&](double num, double den) -> double { return num / (std::abs(den) > kEps ? den : kEps); };
+  auto get_count = [&](const std::unordered_map<std::string, int>& mp, const std::string& key, bool key_ok) -> double {
+    if (!key_ok) return 0.0;
+    auto it = mp.find(key);
+    return (it == mp.end()) ? 0.0 : static_cast<double>(it->second);
+  };
+
+  double device_count = get_count(dev_cnt, dkey_c, (!empty_field(os_c) || !empty_field(dev_c)));
+  double mcc_count = get_count(mcc_cnt, mcc_c, !empty_field(mcc_c));
+  double channel_count = get_count(ch_cnt, ckey_c, (!empty_field(ch_t) || !empty_field(ch_s)));
+  double timezone_count = get_count(tz_cnt, tz_c, !empty_field(tz_c));
+  double bl_count = get_count(bl_cnt, bl_c, !empty_field(bl_c));
+
+  double device_freq = (tx_total > 0.0) ? safe_ratio(device_count, tx_total) : 0.0;
+  double mcc_freq = (tx_total > 0.0) ? safe_ratio(mcc_count, tx_total) : 0.0;
+  double channel_freq = (tx_total > 0.0) ? safe_ratio(channel_count, tx_total) : 0.0;
+  double timezone_freq = (tx_total > 0.0) ? safe_ratio(timezone_count, tx_total) : 0.0;
+  double browser_language_freq = (tx_total > 0.0) ? safe_ratio(bl_count, tx_total) : 0.0;
+
+  auto since_last = [&](const std::unordered_map<std::string, clock::time_point>& last_map, const std::string& key, bool key_ok) -> double {
+    if (!dttm.has_value() || !key_ok) return -1.0;
+    auto it = last_map.find(key);
+    if (it == last_map.end()) return -1.0;
+    return static_cast<double>(std::chrono::duration_cast<std::chrono::seconds>(*dttm - it->second).count());
+  };
+  double time_since_last_device = since_last(last_seen_dev, dkey_c, (!empty_field(os_c) || !empty_field(dev_c)));
+  double time_since_last_mcc = since_last(last_seen_mcc, mcc_c, !empty_field(mcc_c));
+  double time_since_last_channel = since_last(last_seen_ch, ckey_c, (!empty_field(ch_t) || !empty_field(ch_s)));
+
+  int n_sess = 0;
+  if (!sid_c.empty()) {
+    auto it = sess_cnt.find(sid_c);
+    if (it != sess_cnt.end()) n_sess = it->second;
+  }
+
+  double amount_to_median = nan_val();
+  if (std::isfinite(median) && median != 0.0 && std::isfinite(amount)) amount_to_median = amount / median;
+
+  double amount_zscore = nan_val();
+  if (std::isfinite(stdv) && stdv > 0.0 && std::isfinite(amount)) amount_zscore = (amount - mean) / stdv;
+
+  double is_amount_high = 0.0;
+  if (std::isfinite(p95) && std::isfinite(amount) && amount > p95) is_amount_high = 1.0;
+
+  double max_amount_feat = 0.0;
+  if (std::isfinite(max24)) max_amount_feat = max24;
+
+  double time_since = -1.0;
+  if (dttm.has_value() && last_ev.has_value()) {
+    auto sec = std::chrono::duration_cast<std::chrono::seconds>(*dttm - *last_ev).count();
+    time_since = static_cast<double>(sec);
+  }
+
+  double hour_f = dttm.has_value() ? static_cast<double>(hour_val) : nan_val();
+  double dow_f = dttm.has_value() ? static_cast<double>(dow_val) : nan_val();
+  double is_night = (hour_val >= 22 || hour_val < 6) ? 1.0 : 0.0;
+  double is_weekend = (dow_val >= 5) ? 1.0 : 0.0;
+
+  double tr_am = static_cast<double>(std::min(w.count(), kWindowMax));
+  double tx_10m = static_cast<double>(count_since(std::chrono::minutes(10)));
+  double tx_1h = static_cast<double>(count_since(std::chrono::hours(1)));
+  double tx_24h = static_cast<double>(count_since(std::chrono::hours(24)));
+  double sum_1h = sum_since(std::chrono::hours(1));
+  double sum_24h = sum_since(std::chrono::hours(24));
+
+  double descr_freq = 0.0;
+  if (!empty_field(descr) && tx_total > 0.0) {
+    auto it = descr_cnt.find(descr);
+    descr_freq = safe_ratio((it == descr_cnt.end() ? 0.0 : static_cast<double>(it->second)), tx_total);
+  }
+  double etype_freq = 0.0;
+  if (!empty_field(etype_c) && tx_total > 0.0) {
+    auto it = type_cnt.find(etype_c);
+    etype_freq = safe_ratio((it == type_cnt.end() ? 0.0 : static_cast<double>(it->second)), tx_total);
+  }
+
+  std::string compromised_s = trim_copy(get_row_s("compromised"));
+  double compromised_flag = 0.0;
+  if (!compromised_s.empty()) {
+    if (auto pc = parse_double_any(compromised_s)) compromised_flag = (*pc == 1.0) ? 1.0 : 0.0;
+  }
+
+  double log_tr_amount = std::log1p(std::max(0.0, tr_am));
+  double log_tr_denom = (log_tr_amount > kEps) ? log_tr_amount : kEps;
+  double tx_10m_norm = safe_ratio(tx_10m, log_tr_denom);
+  double tx_1h_norm = safe_ratio(tx_1h, log_tr_denom);
+  double tx_24h_norm = safe_ratio(tx_24h, log_tr_denom);
+  double sum_1h_norm = safe_ratio(sum_1h, log_tr_denom);
+  double sum_24h_norm = safe_ratio(sum_24h, log_tr_denom);
+
+  double tx_10m_to_1h = tx_10m / (tx_1h + 1.0);
+  double tx_1h_to_24h = tx_1h / (tx_24h + 1.0);
+  double sum_1h_to_24h = sum_1h / (sum_24h + 1.0);
+
+  double time_since_2nd_prev = -1.0;
+  if (dttm.has_value() && second_last_ev.has_value()) {
+    time_since_2nd_prev =
+        static_cast<double>(std::chrono::duration_cast<std::chrono::seconds>(*dttm - *second_last_ev).count());
+  }
+
+  double mean_gap = -1.0;
+  double std_gap = -1.0;
+  if (!gap_seconds.empty()) {
+    double s = 0.0;
+    for (double g : gap_seconds) s += g;
+    mean_gap = s / static_cast<double>(gap_seconds.size());
+    if (gap_seconds.size() >= 2) {
+      double sq = 0.0;
+      for (double g : gap_seconds) {
+        double d = g - mean_gap;
+        sq += d * d;
+      }
+      std_gap = std::sqrt(std::max(0.0, sq / static_cast<double>(gap_seconds.size() - 1)));
+    } else {
+      std_gap = 0.0;
+    }
+  }
+
+  double amount_to_last_amount = nan_val();
+  if (std::isfinite(amount) && std::isfinite(last_amount_in_window)) {
+    amount_to_last_amount = safe_ratio(amount, last_amount_in_window + kEps);
+  }
+  double amount_to_max_24h = nan_val();
+  if (std::isfinite(amount) && std::isfinite(max_amount_feat)) {
+    amount_to_max_24h = safe_ratio(amount, max_amount_feat + kEps);
+  }
+
+  double time_since_prev_to_mean_gap = -1.0;
+  if (time_since >= 0.0 && mean_gap >= 0.0) {
+    time_since_prev_to_mean_gap = safe_ratio(time_since, mean_gap + kEps);
+  }
+
+  double device_freq_alt = safe_ratio(device_count, std::isfinite(amount) ? (amount + kEps) : kEps);
+  double mcc_freq_alt = safe_ratio(mcc_count, std::isfinite(amount) ? (amount + kEps) : kEps);
+
+  int fi = 0;
+  auto put = [&](double v) { out.f[fi++] = v; };
+  put(amount);
+  put(amount_to_median);
+  put(amount_zscore);
+  put(is_amount_high);
+  put(tx_1h);
+  put(tx_24h);
+  put(sum_1h);
+  put(max_amount_feat);
+  put(device_freq);
+  put(device_count);
+  put(time_since_last_device);
+  put(mcc_freq);
+  put(mcc_count);
+  put(time_since_last_mcc);
+  put(channel_freq);
+  put(channel_count);
+  put(time_since_last_channel);
+  put(timezone_freq);
+  put(browser_language_freq);
+  put(compromised_flag);
+  put(empty_field(get_row_s("web_rdp_connection")) ? 0.0 : 1.0);
+  put(empty_field(get_row_s("phone_voip_call_state")) ? 0.0 : 1.0);
+  put(hour_f);
+  put(dow_f);
+  put(is_night);
+  put(is_weekend);
+  put(tx_10m);
+  put(sum_24h);
+  put(time_since);
+  put(static_cast<double>(n_sess + 1));
+  put(empty_field(tz_c) ? 1.0 : 0.0);
+  put(tr_am);
+  put(cat_from_utf8(descr));
+  put(cat_from_utf8(mcc_c));
+  put(descr_freq);
+  put(etype_freq);
+  put(log_tr_amount);
+  put(tx_10m_norm);
+  put(tx_1h_norm);
+  put(tx_24h_norm);
+  put(sum_1h_norm);
+  put(sum_24h_norm);
+  put(tx_10m_to_1h);
+  put(tx_1h_to_24h);
+  put(sum_1h_to_24h);
+  put(time_since_2nd_prev);
+  put(mean_gap);
+  put(std_gap);
+  put(amount_to_last_amount);
+  put(amount_to_max_24h);
+  put(time_since_prev_to_mean_gap);
+  put(device_freq_alt);
+  put(mcc_freq_alt);
+  if (fi != kNumFeatures) {
+    throw std::runtime_error("feature vector size mismatch");
+  }
+
+  int64_t eid = 0;
+  int eidx = col_index(sch, "event_id");
+  if (eidx >= 0) {
+    if (auto p = col_get_int64(*batch.column(eidx), i)) eid = *p;
+  }
+  out.event_id = eid;
+
+  auto itl = labels_orig.find(eid);
+  if (itl != labels_orig.end()) {
+    out.target = 1;
+    out.sample_weight = (itl->second == 1) ? kWeightLabeled1 : kWeightLabeled0;
+  } else {
+    out.target = 0;
+    out.sample_weight = kWeightUnlabeled;
+  }
+
+  return out;
 }
 
-void print_progress_bar(const std::string& prefix,
-                        int64_t current,
-                        int64_t total,
-                        const std::chrono::steady_clock::time_point& start_time) {
-    if (total <= 0 || current <= 0) return;
-    double frac = static_cast<double>(current) / static_cast<double>(total);
-    if (frac < 0.0) frac = 0.0;
-    if (frac > 1.0) frac = 1.0;
-
-    auto now = std::chrono::steady_clock::now();
-    double elapsed_sec = std::chrono::duration_cast<std::chrono::duration<double>>(now - start_time).count();
-    double eta_sec = elapsed_sec * (1.0 / std::max(frac, 1e-9) - 1.0);
-
-    const int bar_width = 30;
-    int pos = static_cast<int>(bar_width * frac);
-
-    std::ostringstream oss;
-    oss << prefix << " [";
-    for (int i = 0; i < bar_width; ++i) {
-        if (i < pos) oss << '=';
-        else if (i == pos) oss << '>';
-        else oss << ' ';
+static arrow::Status load_labels(const std::string& path,
+                                 std::unordered_map<int64_t, int>* out) {
+  arrow::MemoryPool* pool = arrow::default_memory_pool();
+  ARROW_ASSIGN_OR_RAISE(auto infile, arrow::io::ReadableFile::Open(path));
+  ARROW_ASSIGN_OR_RAISE(auto reader, parquet::arrow::OpenFile(infile, pool));
+  std::shared_ptr<arrow::Table> table;
+  ARROW_RETURN_NOT_OK(reader->ReadTable(&table));
+  auto id_col = table->GetColumnByName("event_id");
+  auto tg_col = table->GetColumnByName("target");
+  if (!id_col || !tg_col) return arrow::Status::Invalid("train_labels missing columns");
+  for (int c = 0; c < id_col->num_chunks(); ++c) {
+    auto id_arr = id_col->chunk(c);
+    auto tg_arr = tg_col->chunk(c);
+    if (id_arr->length() != tg_arr->length()) continue;
+    for (int64_t i = 0; i < id_arr->length(); ++i) {
+      auto e = col_get_int64(*id_arr, i);
+      auto tg = col_get_int64(*tg_arr, i);
+      if (e.has_value() && tg.has_value()) (*out)[*e] = static_cast<int>(*tg);
     }
-    oss << "] " << std::fixed << std::setprecision(1) << (frac * 100.0) << "%";
-    oss << " | elapsed " << format_seconds(elapsed_sec)
-        << " | ETA " << format_seconds(eta_sec);
-
-    std::cout << "\r" << oss.str() << std::flush;
+  }
+  return arrow::Status::OK();
 }
 
-void finish_progress_line() {
-    std::cout << std::endl;
-}
-
-// ---------- Дата/время и weekday (как datetime.weekday) ---------------
-
-struct DateTime {
-    int year, month, day, hour, minute, second;
-};
-
-std::optional<DateTime> parse_dttm_str(const std::string& s) {
-    if (s.empty()) return std::nullopt;
-    DateTime dt{};
-    if (std::sscanf(s.c_str(), "%d-%d-%d %d:%d:%d",
-                    &dt.year, &dt.month, &dt.day,
-                    &dt.hour, &dt.minute, &dt.second) != 6) {
-        return std::nullopt;
-    }
-    return dt;
-}
-
-std::optional<std::chrono::system_clock::time_point> to_time_point(const DateTime& dt) {
-    std::tm t{};
-    t.tm_year = dt.year - 1900;
-    t.tm_mon  = dt.month - 1;
-    t.tm_mday = dt.day;
-    t.tm_hour = dt.hour;
-    t.tm_min  = dt.minute;
-    t.tm_sec  = dt.second;
-    std::time_t tt = std::mktime(&t);
-    if (tt == -1) return std::nullopt;
-    return std::chrono::system_clock::from_time_t(tt);
-}
-
-// Sakamoto's algorithm, Sunday = 0
-int weekday_sakamoto(int y, int m, int d) {
-    static int t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
-    if (m < 3) y -= 1;
-    return (y + y/4 - y/100 + y/400 + t[m-1] + d) % 7;
-}
-// Python weekday: Monday=0, Sunday=6
-int weekday_python(int y, int m, int d) {
-    int w = weekday_sakamoto(y, m, d); // Sun=0
-    return (w + 6) % 7;                // Mon=0, Tue=1, ..., Sun=6
-}
-
-// --------------------- Агрегаты по пользователю -----------------------
-
-struct UserAggregates {
-    double sum_amt = 0.0;
-    double sum_sq = 0.0;
-    int count = 0;
-    std::vector<double> amounts;
-    std::deque<std::pair<std::chrono::system_clock::time_point, double>> recent_events;
-
-    std::set<std::pair<std::string, std::string>> seen_devices;
-    std::set<std::string> seen_mcc;
-    std::set<std::pair<std::string, std::string>> seen_channels;
-    std::set<std::string> seen_timezones;
-    bool ever_compromised = false;
-    bool ever_web_rdp = false;
-    bool ever_voip = false;
-    std::optional<std::chrono::system_clock::time_point> last_event_dttm;
-    std::unordered_map<std::string, int> session_counts;
-    std::set<std::string> seen_browser_languages;
-
-    void update(const std::unordered_map<std::string, std::string>& row) {
-        auto get = [&](const std::string& k)->std::string{
-            auto it = row.find(k);
-            return (it == row.end()) ? "" : it->second;
-        };
-
-        std::string amt_s = get(AMOUNT_COLUMN);
-        if (amt_s.empty()) return;
-        double amount;
-        try { amount = std::stod(amt_s); } catch (...) { return; }
-
-        sum_amt += amount;
-        sum_sq  += amount * amount;
-        count   += 1;
-        amounts.push_back(amount);
-
-        std::string dttm_s = get(EVENT_DTTM_COLUMN);
-        if (!dttm_s.empty()) {
-            auto dt_opt = parse_dttm_str(dttm_s);
-            if (dt_opt) {
-                auto tp_opt = to_time_point(*dt_opt);
-                if (tp_opt) {
-                    auto tp = *tp_opt;
-                    auto cutoff = tp - std::chrono::hours(24);
-                    while (!recent_events.empty() && recent_events.front().first < cutoff)
-                        recent_events.pop_front();
-                    recent_events.emplace_back(tp, amount);
-                    last_event_dttm = tp;
-                }
-            }
-        }
-
-        std::string os_type = get(OPERATING_SYSTEM_TYPE);
-        std::string dev_ver = get(DEVICE_SYSTEM_VERSION);
-        if (!os_type.empty() || !dev_ver.empty())
-            seen_devices.emplace(os_type, dev_ver);
-
-        std::string mcc = get(MCC_CODE);
-        if (!mcc.empty()) seen_mcc.insert(mcc);
-
-        std::string ch_type = get(CHANNEL_INDICATOR_TYPE);
-        std::string ch_sub  = get(CHANNEL_INDICATOR_SUB_TYPE);
-        if (!ch_type.empty() || !ch_sub.empty())
-            seen_channels.emplace(ch_type, ch_sub);
-
-        std::string tz = get(TIMEZONE_COLUMN);
-        if (!tz.empty()) seen_timezones.insert(tz);
-
-        if (!get(COMPROMISED_COLUMN).empty())      ever_compromised = true;
-        if (!get(WEB_RDP_CONNECTION).empty())      ever_web_rdp = true;
-        if (!get(PHONE_VOIP_CALL_STATE).empty())   ever_voip = true;
-
-        std::string sid = get(SESSION_ID_COLUMN);
-        if (!sid.empty()) session_counts[sid] += 1;
-
-        std::string bl = get(BROWSER_LANGUAGE_COLUMN);
-        if (!bl.empty()) seen_browser_languages.insert(bl);
-    }
-
-    double mean() const {
-        if (count == 0) return std::numeric_limits<double>::quiet_NaN();
-        return sum_amt / count;
-    }
-
-    double std() const {
-        if (count < 2) return std::numeric_limits<double>::quiet_NaN();
-        double var = (sum_sq - sum_amt * sum_amt / count) / (count - 1);
-        if (var < 0) var = 0;
-        return std::sqrt(var);
-    }
-
-    double median() const {
-        if (amounts.empty()) return std::numeric_limits<double>::quiet_NaN();
-        std::vector<double> tmp = amounts;
-        std::sort(tmp.begin(), tmp.end());
-        size_t n = tmp.size();
-        if (n % 2 == 1) return tmp[n/2];
-        return 0.5 * (tmp[n/2 - 1] + tmp[n/2]);
-    }
-
-    double percentile(double q) const {
-        if (amounts.empty()) return std::numeric_limits<double>::quiet_NaN();
-        std::vector<double> tmp = amounts;
-        std::sort(tmp.begin(), tmp.end());
-        double pos = (q / 100.0) * (tmp.size() - 1);
-        size_t idx = static_cast<size_t>(std::round(pos));
-        if (idx >= tmp.size()) idx = tmp.size() - 1;
-        return tmp[idx];
-    }
-
-    int transactions_last_1h(const std::chrono::system_clock::time_point& now) const {
-        auto cutoff = now - std::chrono::hours(1);
-        int c = 0;
-        for (auto& p : recent_events) if (p.first >= cutoff) ++c;
-        return c;
-    }
-
-    int transactions_last_24h(const std::chrono::system_clock::time_point& now) const {
-        auto cutoff = now - std::chrono::hours(24);
-        int c = 0;
-        for (auto& p : recent_events) if (p.first >= cutoff) ++c;
-        return c;
-    }
-
-    double sum_amount_last_1h(const std::chrono::system_clock::time_point& now) const {
-        auto cutoff = now - std::chrono::hours(1);
-        double s = 0.0;
-        for (auto& p : recent_events) if (p.first >= cutoff) s += p.second;
-        return s;
-    }
-
-    double max_amount_last_24h(const std::chrono::system_clock::time_point& now) const {
-        auto cutoff = now - std::chrono::hours(24);
-        double m = std::numeric_limits<double>::quiet_NaN();
-        bool has = false;
-        for (auto& p : recent_events) {
-            if (p.first >= cutoff) {
-                if (!has || p.second > m) {
-                    m = p.second;
-                    has = true;
-                }
-            }
-        }
-        return has ? m : std::numeric_limits<double>::quiet_NaN();
-    }
-
-    int transactions_last_10m(const std::chrono::system_clock::time_point& now) const {
-        auto cutoff = now - std::chrono::minutes(10);
-        int c = 0;
-        for (auto& p : recent_events) if (p.first >= cutoff) ++c;
-        return c;
-    }
-
-    double sum_amount_last_24h(const std::chrono::system_clock::time_point& now) const {
-        auto cutoff = now - std::chrono::hours(24);
-        double s = 0.0;
-        for (auto& p : recent_events) if (p.first >= cutoff) s += p.second;
-        return s;
-    }
-
-    int get_session_count(const std::string& sid) const {
-        if (sid.empty()) return 0;
-        auto it = session_counts.find(sid);
-        return it == session_counts.end() ? 0 : it->second;
-    }
-};
-
-// ------ Оконное хранение последних транзакций по пользователю --------
-
-struct WindowedAggregates {
-    std::deque<std::unordered_map<std::string, std::string>> rows;
-    int window_size;
-
-    explicit WindowedAggregates(int ws = WINDOW_TRANSACTIONS)
-        : window_size(ws) {}
-
-    void add(const std::unordered_map<std::string, std::string>& row) {
-        if ((int)rows.size() == window_size) rows.pop_front();
-        rows.push_back(row);
-    }
-
-    UserAggregates get_aggregates() const {
-        UserAggregates agg;
-        for (auto& r : rows) agg.update(r);
-        return agg;
-    }
-
-    size_t size() const { return rows.size(); }
-};
-
-// ----------------- Чтение parquet и преобразование строк --------------
-
-std::shared_ptr<arrow::Table> read_parquet_table(const fs::path& path) {
-    std::shared_ptr<arrow::io::ReadableFile> infile;
-    PARQUET_ASSIGN_OR_THROW(
-        infile,
-        arrow::io::ReadableFile::Open(path.string())
-    );
-    auto reader_result = parquet::arrow::OpenFile(infile, arrow::default_memory_pool());
-    if (!reader_result.ok()) {
-        throw std::runtime_error(reader_result.status().ToString());
-    }
-    std::unique_ptr<parquet::arrow::FileReader> reader = std::move(reader_result).ValueOrDie();
-    std::shared_ptr<arrow::Table> table;
-    PARQUET_THROW_NOT_OK(reader->ReadTable(&table));
-    PARQUET_ASSIGN_OR_THROW(table, table->CombineChunks());
-    return table;
-}
-
-std::unordered_map<std::string, std::string> row_to_map(
-    const std::shared_ptr<arrow::Table>& table,
-    int64_t row_idx,
-    const std::vector<std::string>& cols)
-{
-    std::unordered_map<std::string, std::string> row;
-    for (const auto& name : cols) {
-        auto col = table->GetColumnByName(name);
-        if (!col) continue;
-        auto chunked = std::static_pointer_cast<arrow::ChunkedArray>(col);
-        if (chunked->num_chunks() == 0) continue;
-        auto arr = chunked->chunk(0);
-        if (row_idx >= arr->length()) continue;
-        if (arr->IsNull(row_idx)) continue;
-        auto scalar_res = arr->GetScalar(row_idx);
-        if (!scalar_res.ok()) continue;
-        auto scalar = *scalar_res;
-        row[name] = scalar->ToString();
-    }
-    return row;
-}
-
-// ------------------- Загрузка разметки event_id -> target ------------
-
-std::unordered_map<long long, int> load_train_labels(const fs::path& path) {
-    if (!fs::exists(path))
-        throw std::runtime_error("Labels not found: " + path.string());
-    auto table = read_parquet_table(path);
-    auto event_col = table->GetColumnByName("event_id");
-    auto target_col = table->GetColumnByName("target");
-    if (!event_col || !target_col)
-        throw std::runtime_error("Labels parquet must have event_id and target");
-
-    std::unordered_map<long long, int> labels;
-    auto n = table->num_rows();
-    auto ev_chunked = std::static_pointer_cast<arrow::ChunkedArray>(event_col);
-    auto tg_chunked = std::static_pointer_cast<arrow::ChunkedArray>(target_col);
-    auto ev_arr = ev_chunked->chunk(0);
-    auto tg_arr = tg_chunked->chunk(0);
-
-    for (int64_t i = 0; i < n; ++i) {
-        if (ev_arr->IsNull(i) || tg_arr->IsNull(i)) continue;
-        auto ev_scalar_res = ev_arr->GetScalar(i);
-        auto tg_scalar_res = tg_arr->GetScalar(i);
-        if (!ev_scalar_res.ok() || !tg_scalar_res.ok()) continue;
-        auto ev_scalar = *ev_scalar_res;
-        auto tg_scalar = *tg_scalar_res;
-        long long eid = std::stoll(ev_scalar->ToString());
-        int tgt = std::stoi(tg_scalar->ToString());
-        labels[eid] = tgt;
-    }
-    return labels;
-}
-
-// ----------------- md5-хеш для категориальных признаков --------------
-
-double cat_to_float(const std::string& val) {
-    if (val.empty()) return 0.0;
-    unsigned char digest[MD5_DIGEST_LENGTH];
-    MD5(reinterpret_cast<const unsigned char*>(val.c_str()), val.size(), digest);
-    __int128 big = 0;
-    for (int i = 0; i < MD5_DIGEST_LENGTH; ++i) {
-        big = (big << 8) | digest[i];
-    }
-    long long mod = static_cast<long long>(big % 1000000);
-    if (mod < 0) mod += 1000000;
-    return static_cast<double>(mod);
-}
-
-// ----------------- compute_features (порт с shared/features.py) -------
-
-std::unordered_map<std::string, double> compute_features_cpp(
-    const UserAggregates& agg,
-    const std::unordered_map<std::string, std::string>& row,
-    int tr_amount)
-{
-    auto get_double_nan = [&](const std::string& key)->double{
-        auto it = row.find(key);
-        if (it == row.end() || it->second.empty())
-            return std::numeric_limits<double>::quiet_NaN();
-        try { return std::stod(it->second); } catch (...) {
-            return std::numeric_limits<double>::quiet_NaN();
-        }
-    };
-    auto get_str = [&](const std::string& key)->std::string{
-        auto it = row.find(key);
-        return (it == row.end()) ? "" : it->second;
-    };
-
-    double amount = get_double_nan(AMOUNT_COLUMN);
-
-    double median = agg.median();
-    double mean   = agg.mean();
-    double stdv   = agg.std();
-    auto nan = std::numeric_limits<double>::quiet_NaN();
-
-    double amount_to_median =
-        (!std::isnan(median) && median != 0.0) ? (amount / median) : nan;
-    double amount_zscore =
-        (!std::isnan(stdv) && stdv > 0.0) ? ((amount - mean) / stdv) : nan;
-
-    double p95 = agg.percentile(95.0);
-    double is_amount_high = (!std::isnan(p95) && amount > p95) ? 1.0 : 0.0;
-
-    int transactions_last_1h = 0;
-    int transactions_last_24h = 0;
-    double sum_amount_last_1h = 0.0;
-    double max_amount_last_24h = nan;
-    int transactions_last_10m = 0;
-    double sum_amount_last_24h = 0.0;
-    int hour_val = -1;
-    int day_of_week_val = -1;
-    double time_since_prev = nan;
-
-    std::string dttm_s = get_str(EVENT_DTTM_COLUMN);
-    auto dt_opt = parse_dttm_str(dttm_s);
-    if (dt_opt) {
-        auto tp_opt = to_time_point(*dt_opt);
-        if (tp_opt) {
-            auto tp = *tp_opt;
-            transactions_last_1h = agg.transactions_last_1h(tp);
-            transactions_last_24h = agg.transactions_last_24h(tp);
-            sum_amount_last_1h = agg.sum_amount_last_1h(tp);
-            max_amount_last_24h = agg.max_amount_last_24h(tp);
-            transactions_last_10m = agg.transactions_last_10m(tp);
-            sum_amount_last_24h = agg.sum_amount_last_24h(tp);
-            hour_val = dt_opt->hour;
-            day_of_week_val = weekday_python(dt_opt->year, dt_opt->month, dt_opt->day);
-            if (agg.last_event_dttm) {
-                auto diff = std::chrono::duration_cast<std::chrono::seconds>(
-                    tp - *agg.last_event_dttm).count();
-                time_since_prev = static_cast<double>(diff);
-            }
-        }
-    }
-
-    std::string os_type = get_str(OPERATING_SYSTEM_TYPE);
-    std::string dev_ver = get_str(DEVICE_SYSTEM_VERSION);
-    std::pair<std::string,std::string> device_key{os_type, dev_ver};
-    double is_new_device =
-        (!os_type.empty() || !dev_ver.empty()) &&
-        (agg.seen_devices.find(device_key) == agg.seen_devices.end()) ? 1.0 : 0.0;
-
-    std::string mcc = get_str(MCC_CODE);
-    double is_new_mcc =
-        (!mcc.empty() && agg.seen_mcc.find(mcc) == agg.seen_mcc.end()) ? 1.0 : 0.0;
-
-    std::string ch_type = get_str(CHANNEL_INDICATOR_TYPE);
-    std::string ch_sub  = get_str(CHANNEL_INDICATOR_SUB_TYPE);
-    std::pair<std::string,std::string> ch_key{ch_type, ch_sub};
-    double is_new_channel =
-        (!ch_type.empty() || !ch_sub.empty()) &&
-        (agg.seen_channels.find(ch_key) == agg.seen_channels.end()) ? 1.0 : 0.0;
-
-    std::string tz = get_str(TIMEZONE_COLUMN);
-    double is_new_timezone =
-        (!tz.empty() && agg.seen_timezones.find(tz) == agg.seen_timezones.end()) ? 1.0 : 0.0;
-
-    double is_compromised_device =
-        (!get_str(COMPROMISED_COLUMN).empty()) ? 1.0 : 0.0;
-    double web_rdp_connection =
-        (!get_str(WEB_RDP_CONNECTION).empty()) ? 1.0 : 0.0;
-    double phone_voip_call_state =
-        (!get_str(PHONE_VOIP_CALL_STATE).empty()) ? 1.0 : 0.0;
-
-    double is_night =
-        (hour_val >= 22 || hour_val < 6) ? 1.0 : 0.0;
-    double is_weekend =
-        (day_of_week_val >= 5) ? 1.0 : 0.0;
-
-    std::string bl = get_str(BROWSER_LANGUAGE_COLUMN);
-    double is_new_browser_language =
-        (!bl.empty() && agg.seen_browser_languages.find(bl) == agg.seen_browser_languages.end())
-        ? 1.0 : 0.0;
-
-    std::string sid = get_str(SESSION_ID_COLUMN);
-    double transactions_in_session =
-        static_cast<double>(agg.get_session_count(sid) + 1);
-
-    std::string tz_val = get_str(TIMEZONE_COLUMN);
-    double timezone_missing =
-        (tz_val.empty()) ? 1.0 : 0.0;
-
-    std::unordered_map<std::string, double> res;
-    res["operation_amt"] = amount;
-    res["amount_to_median"] = amount_to_median;
-    res["amount_zscore"] = amount_zscore;
-    res["is_amount_high"] = is_amount_high;
-    res["transactions_last_1h"] = static_cast<double>(transactions_last_1h);
-    res["transactions_last_24h"] = static_cast<double>(transactions_last_24h);
-    res["sum_amount_last_1h"] = sum_amount_last_1h;
-    res["max_amount_last_24h"] =
-        std::isnan(max_amount_last_24h) ? 0.0 : max_amount_last_24h;
-    res["is_new_device"] = is_new_device;
-    res["is_new_mcc"] = is_new_mcc;
-    res["is_new_channel"] = is_new_channel;
-    res["is_new_timezone"] = is_new_timezone;
-    res["is_compromised_device"] = is_compromised_device;
-    res["web_rdp_connection"] = web_rdp_connection;
-    res["phone_voip_call_state"] = phone_voip_call_state;
-    res["hour"] = (hour_val >= 0) ? static_cast<double>(hour_val)
-                                  : std::numeric_limits<double>::quiet_NaN();
-    res["day_of_week"] = (day_of_week_val >= 0) ? static_cast<double>(day_of_week_val)
-                                                : std::numeric_limits<double>::quiet_NaN();
-    res["is_night_transaction"] = is_night;
-    res["is_weekend"] = is_weekend;
-    res["transactions_last_10m"] = static_cast<double>(transactions_last_10m);
-    res["sum_amount_last_24h"] = sum_amount_last_24h;
-    res["time_since_prev_transaction"] =
-        std::isnan(time_since_prev) ? -1.0 : time_since_prev;
-    res["is_new_browser_language"] = is_new_browser_language;
-    res["transactions_in_session"] = transactions_in_session;
-    res["timezone_missing"] = timezone_missing;
-    res["tr_amount"] = static_cast<double>(tr_amount);
-
-    std::string ev_descr = get_str(EVENT_DESCR_COLUMN);
-    if (ev_descr.empty()) ev_descr = get_str(EVENT_DESC_COLUMN);
-    res["event_descr"] = cat_to_float(ev_descr);
-    res["mcc_code"] = cat_to_float(get_str(MCC_CODE));
-
-    return res;
-}
-
-// ----------------- Заполнение оконных агрегатов из pretrain ----------
-
-void build_windowed_from_pretrain(
-    const std::vector<fs::path>& pretrain_paths,
-    std::unordered_map<std::string, WindowedAggregates>& win_aggs)
-{
-    for (const auto& path : pretrain_paths) {
-        if (!fs::exists(path)) {
-            std::cerr << "Pretrain file not found: " << path << "\n";
-            continue;
-        }
-        std::cout << "Pretrain: " << path << std::endl;
-        auto table = read_parquet_table(path);
-        auto n = table->num_rows();
-        auto start_time = std::chrono::steady_clock::now();
-        const int64_t report_every = std::max<int64_t>(n / 200, 10000); // ~200 апдейтов, но не чаще чем каждые 10k строк
-        for (int64_t i = 0; i < n; ++i) {
-            auto row = row_to_map(table, i, FEATURE_COLUMNS);
-            auto it_cid = row.find(CUSTOMER_ID_COLUMN);
-            if (it_cid == row.end() || it_cid->second.empty()) continue;
-            std::string cid = it_cid->second;
-            auto& wagg = win_aggs[cid];
-            if (wagg.window_size == 0) wagg.window_size = WINDOW_TRANSACTIONS;
-            wagg.add(row);
-
-            if (i % report_every == 0 || i + 1 == n) {
-                print_progress_bar("  rows", i + 1, n, start_time);
-            }
-        }
-        finish_progress_line();
-    }
-}
-
-// ----------------- Основной проход по train (аналог _run_sequential) --
-
-struct Columnar {
-    std::unordered_map<std::string, std::vector<double>> num_cols;
-    std::vector<int64_t> event_id;
-    std::vector<int32_t> target;
-    std::vector<double> weight;
-    std::vector<std::string> event_dttm;
-};
-
-// Объявление функции записи батча в parquet (реализация ниже).
-void write_parquet_dataset(const Columnar& col, const fs::path& out_path);
-
-void init_columnar(Columnar& col) {
-    col.num_cols.clear();
-    for (const auto& name : FEATURE_NAMES) {
-        col.num_cols[name] = {};
-    }
-    col.event_id.clear();
-    col.target.clear();
-    col.weight.clear();
-    col.event_dttm.clear();
-}
-
-int64_t process_train_sequential(
-    const std::vector<fs::path>& train_paths,
-    const std::unordered_map<long long, int>& labels,
-    std::unordered_map<std::string, WindowedAggregates>& win_aggs,
-    const fs::path& out_dir)
-{
-    Columnar batch;
-    init_columnar(batch);
-    int64_t total_rows = 0;
-    int part_index = 0;
-
-    for (const auto& path : train_paths) {
-        if (!fs::exists(path)) {
-            std::cerr << "Train file not found: " << path << "\n";
-            continue;
-        }
-        std::cout << "Train: " << path << std::endl;
-        auto table = read_parquet_table(path);
-        auto n = table->num_rows();
-        auto start_time = std::chrono::steady_clock::now();
-        const int64_t report_every = std::max<int64_t>(n / 200, 10000);
-        for (int64_t i = 0; i < n; ++i) {
-            auto row = row_to_map(table, i, FEATURE_COLUMNS);
-            auto it_cid = row.find(CUSTOMER_ID_COLUMN);
-            if (it_cid == row.end() || it_cid->second.empty()) continue;
-            std::string cid = it_cid->second;
-
-            auto& wagg = win_aggs[cid];
-            if (wagg.window_size == 0) wagg.window_size = WINDOW_TRANSACTIONS;
-            UserAggregates agg = wagg.get_aggregates();
-            int tr_amount = std::min<int>(wagg.size(), WINDOW_TRANSACTIONS);
-            auto feats = compute_features_cpp(agg, row, tr_amount);
-            wagg.add(row);
-
-            long long eid = 0;
-            auto it_eid = row.find(EVENT_ID_COLUMN);
-            if (it_eid != row.end() && !it_eid->second.empty()) {
-                eid = std::stoll(it_eid->second);
-            }
-            bool is_labeled = labels.find(eid) != labels.end();
-            int tgt = is_labeled ? 1 : 0;
-            double w = WEIGHT_UNLABELED;
-            if (is_labeled) {
-                int lab = labels.at(eid);
-                w = (lab == 0) ? WEIGHT_LABELED_0 : WEIGHT_LABELED_1;
-            }
-
-            for (const auto& name : FEATURE_NAMES) {
-                batch.num_cols[name].push_back(feats.at(name));
-            }
-            batch.event_id.push_back(eid);
-            batch.target.push_back(tgt);
-            batch.weight.push_back(w);
-            auto it_dttm = row.find(EVENT_DTTM_COLUMN);
-            batch.event_dttm.push_back(it_dttm == row.end() ? "" : it_dttm->second);
-
-            ++total_rows;
-
-            // Если батч разросся, записываем его на диск и очищаем.
-            if (static_cast<int64_t>(batch.event_id.size()) >= MAX_BATCH_ROWS) {
-                fs::path out_path = out_dir / ("train_dataset_part_" + std::to_string(part_index) + ".parquet");
-                std::cout << "\nFlushing batch to " << out_path << " (" << batch.event_id.size() << " rows)\n";
-                write_parquet_dataset(batch, out_path);
-                ++part_index;
-                init_columnar(batch);
-            }
-
-            if (i % report_every == 0 || i + 1 == n) {
-                print_progress_bar("  rows", i + 1, n, start_time);
-            }
-        }
-        finish_progress_line();
-    }
-
-    // Финальный батч, если остались строки.
-    if (!batch.event_id.empty()) {
-        fs::path out_path = out_dir / ("train_dataset_part_" + std::to_string(part_index) + ".parquet");
-        std::cout << "Flushing final batch to " << out_path << " (" << batch.event_id.size() << " rows)\n";
-        write_parquet_dataset(batch, out_path);
-        ++part_index;
-    }
-
-    if (total_rows == 0) {
-        throw std::runtime_error("No rows collected");
-    }
-
-    std::cout << "Total rows written: " << total_rows
-              << " in " << part_index << " parquet part(s)\n";
-
-    return total_rows;
-}
-
-// ----------------- Запись результата в parquet ------------------------
-
-void write_parquet_dataset(const Columnar& col, const fs::path& out_path) {
-    auto pool = arrow::default_memory_pool();
+class DatasetWriter {
+ public:
+  explicit DatasetWriter(const std::string& out_path) : out_path_(out_path) {
     std::vector<std::shared_ptr<arrow::Field>> fields;
-    std::vector<std::shared_ptr<arrow::Array>> arrays;
+    for (int i = 0; i < kNumFeatures; ++i) {
+      fields.push_back(arrow::field(kFeatureNames[i], arrow::float64()));
+    }
+    fields.push_back(arrow::field("event_id", arrow::int64()));
+    fields.push_back(arrow::field("target", arrow::int32()));
+    fields.push_back(arrow::field("sample_weight", arrow::float64()));
+    fields.push_back(arrow::field("event_dttm", arrow::utf8()));
+    schema_ = arrow::schema(fields);
+    reset_builders();
+  }
 
-    for (const auto& name : FEATURE_NAMES) {
-        arrow::DoubleBuilder builder(pool);
-        const auto& v = col.num_cols.at(name);
-        PARQUET_THROW_NOT_OK(builder.AppendValues(v));
-        std::shared_ptr<arrow::Array> arr;
-        PARQUET_THROW_NOT_OK(builder.Finish(&arr));
-        fields.push_back(arrow::field(name, arrow::float64()));
-        arrays.push_back(arr);
+  arrow::Status append(const FeatureRow& r) {
+    for (int j = 0; j < kNumFeatures; ++j) {
+      ARROW_RETURN_NOT_OK(feat_builders_[j]->Append(r.f[j]));
     }
+    ARROW_RETURN_NOT_OK(id_b_->Append(r.event_id));
+    ARROW_RETURN_NOT_OK(tg_b_->Append(r.target));
+    ARROW_RETURN_NOT_OK(w_b_->Append(r.sample_weight));
+    ARROW_RETURN_NOT_OK(dt_b_->Append(r.event_dttm_raw));
+    ++buf_size_;
+    if (buf_size_ >= kOutBatch) return flush();
+    return arrow::Status::OK();
+  }
 
-    {
-        arrow::Int64Builder b(pool);
-        PARQUET_THROW_NOT_OK(b.AppendValues(col.event_id));
-        std::shared_ptr<arrow::Array> arr;
-        PARQUET_THROW_NOT_OK(b.Finish(&arr));
-        fields.push_back(arrow::field("event_id", arrow::int64()));
-        arrays.push_back(arr);
+  arrow::Status flush() {
+    if (buf_size_ == 0) return arrow::Status::OK();
+    ARROW_RETURN_NOT_OK(ensure_open());
+    std::vector<std::shared_ptr<arrow::Array>> arrs;
+    for (int j = 0; j < kNumFeatures; ++j) {
+      std::shared_ptr<arrow::Array> a;
+      ARROW_RETURN_NOT_OK(feat_builders_[j]->Finish(&a));
+      arrs.push_back(a);
     }
-    {
-        arrow::Int32Builder b(pool);
-        PARQUET_THROW_NOT_OK(b.AppendValues(col.target));
-        std::shared_ptr<arrow::Array> arr;
-        PARQUET_THROW_NOT_OK(b.Finish(&arr));
-        fields.push_back(arrow::field("target", arrow::int32()));
-        arrays.push_back(arr);
-    }
-    {
-        arrow::DoubleBuilder b(pool);
-        PARQUET_THROW_NOT_OK(b.AppendValues(col.weight));
-        std::shared_ptr<arrow::Array> arr;
-        PARQUET_THROW_NOT_OK(b.Finish(&arr));
-        fields.push_back(arrow::field("sample_weight", arrow::float64()));
-        arrays.push_back(arr);
-    }
-    {
-        arrow::StringBuilder b(pool);
-        for (auto& s : col.event_dttm) {
-            PARQUET_THROW_NOT_OK(b.Append(s));
-        }
-        std::shared_ptr<arrow::Array> arr;
-        PARQUET_THROW_NOT_OK(b.Finish(&arr));
-        fields.push_back(arrow::field("event_dttm", arrow::utf8()));
-        arrays.push_back(arr);
-    }
+    std::shared_ptr<arrow::Array> a_id, a_tg, a_w, a_dt;
+    ARROW_RETURN_NOT_OK(id_b_->Finish(&a_id));
+    ARROW_RETURN_NOT_OK(tg_b_->Finish(&a_tg));
+    ARROW_RETURN_NOT_OK(w_b_->Finish(&a_w));
+    ARROW_RETURN_NOT_OK(dt_b_->Finish(&a_dt));
+    arrs.push_back(a_id);
+    arrs.push_back(a_tg);
+    arrs.push_back(a_w);
+    arrs.push_back(a_dt);
+    auto table = arrow::Table::Make(schema_, arrs);
+    ARROW_RETURN_NOT_OK(writer_->WriteTable(*table, table->num_rows()));
+    buf_size_ = 0;
+    reset_builders();
+    rows_written_ += table->num_rows();
+    log_msg("written row group rows=" + std::to_string(table->num_rows()) +
+            " total_rows=" + std::to_string(rows_written_));
+    return arrow::Status::OK();
+  }
 
-    auto schema = arrow::schema(fields);
-    auto table = arrow::Table::Make(schema, arrays);
+  arrow::Status close() {
+    ARROW_RETURN_NOT_OK(flush());
+    if (writer_) {
+      ARROW_RETURN_NOT_OK(writer_->Close());
+      writer_.reset();
+    }
+    if (outfile_) {
+      ARROW_RETURN_NOT_OK(outfile_->Close());
+      outfile_.reset();
+    }
+    log_msg("final dataset written: " + out_path_ + " rows=" + std::to_string(rows_written_));
+    return arrow::Status::OK();
+  }
 
-    fs::create_directories(out_path.parent_path());
-    std::shared_ptr<arrow::io::FileOutputStream> outfile;
-    PARQUET_ASSIGN_OR_THROW(
-        outfile,
-        arrow::io::FileOutputStream::Open(out_path.string())
-    );
-    PARQUET_THROW_NOT_OK(
-        parquet::arrow::WriteTable(*table, pool, outfile, 1024 * 1024)
-    );
+ private:
+  arrow::Status ensure_open() {
+    if (writer_) return arrow::Status::OK();
+    ARROW_ASSIGN_OR_RAISE(outfile_, arrow::io::FileOutputStream::Open(out_path_));
+    parquet::WriterProperties::Builder pb;
+    std::shared_ptr<parquet::WriterProperties> props = pb.build();
+    ARROW_ASSIGN_OR_RAISE(
+        writer_, parquet::arrow::FileWriter::Open(*schema_, arrow::default_memory_pool(), outfile_, props));
+    log_msg("opened output parquet: " + out_path_);
+    return arrow::Status::OK();
+  }
+
+  void reset_builders() {
+    feat_builders_.clear();
+    for (int i = 0; i < kNumFeatures; ++i) {
+      feat_builders_.push_back(std::make_shared<arrow::DoubleBuilder>());
+    }
+    id_b_ = std::make_shared<arrow::Int64Builder>();
+    tg_b_ = std::make_shared<arrow::Int32Builder>();
+    w_b_ = std::make_shared<arrow::DoubleBuilder>();
+    dt_b_ = std::make_shared<arrow::StringBuilder>();
+  }
+
+  std::string out_path_;
+  std::shared_ptr<arrow::Schema> schema_;
+  std::vector<std::shared_ptr<arrow::DoubleBuilder>> feat_builders_;
+  std::shared_ptr<arrow::Int64Builder> id_b_;
+  std::shared_ptr<arrow::Int32Builder> tg_b_;
+  std::shared_ptr<arrow::DoubleBuilder> w_b_;
+  std::shared_ptr<arrow::StringBuilder> dt_b_;
+  std::shared_ptr<arrow::io::FileOutputStream> outfile_;
+  std::unique_ptr<parquet::arrow::FileWriter> writer_;
+  int buf_size_ = 0;
+  int64_t rows_written_ = 0;
+};
+
+static arrow::Status process_file(const std::string& path, bool is_train,
+                                  std::unordered_map<std::string, UserWindow>* win_map,
+                                  const std::unordered_map<int64_t, int>& labels, DatasetWriter* wr) {
+  arrow::MemoryPool* pool = arrow::default_memory_pool();
+  ARROW_ASSIGN_OR_RAISE(auto infile, arrow::io::ReadableFile::Open(path));
+  ARROW_ASSIGN_OR_RAISE(auto reader, parquet::arrow::OpenFile(infile, pool));
+  int64_t total_rows = 0;
+  if (auto* pqr = reader->parquet_reader()) {
+    if (auto meta = pqr->metadata()) total_rows = meta->num_rows();
+  }
+  const std::string tag = path_basename(path) + (is_train ? " [train]" : " [pretrain]");
+  log_msg("reading " + path + " rows_meta=" + std::to_string(total_rows) + (is_train ? " (emit dataset)" : " (window only)"));
+  ARROW_ASSIGN_OR_RAISE(auto rb, reader->GetRecordBatchReader());
+  int64_t rows_seen = 0;
+  while (true) {
+    // Parquet не реализует ReadNext() без аргументов (RecordBatchWithMetadata) — используем Next().
+    ARROW_ASSIGN_OR_RAISE(auto batch_ptr, rb->Next());
+    if (!batch_ptr) break;
+    const arrow::RecordBatch& batch = *batch_ptr;
+    const auto& sch = *batch.schema();
+    int64_t n = batch.num_rows();
+    int cidx = col_index(sch, "customer_id");
+    if (cidx < 0) {
+      rows_seen += n;
+      render_row_progress(rows_seen, total_rows, tag);
+      continue;
+    }
+    auto& col_c = *batch.column(cidx);
+    for (int64_t i = 0; i < n; ++i) {
+      std::string ck = col_get_str(col_c, i);
+      if (ck.empty()) continue;
+      UserWindow& w = (*win_map)[ck];
+      if (is_train) {
+        FeatureRow fr = compute_features(w, batch, i, sch, labels);
+        ARROW_RETURN_NOT_OK(wr->append(fr));
+      }
+      w.push(row_to_txn(batch, i, sch));
+    }
+    rows_seen += n;
+    render_row_progress(rows_seen, total_rows, tag);
+  }
+  std::cerr << "\n";
+  log_msg("finished " + path + " batches_rows_seen=" + std::to_string(rows_seen));
+  return arrow::Status::OK();
 }
-
-// ----------------- main ----------------------------------------------
 
 int main(int argc, char** argv) {
-    try {
-        // Ожидается, что бинарь запускается из корня репозитория (PROJECT_ROOT)
-        fs::path project_root = fs::current_path();
-        fs::path data_root = project_root / "data";
-        fs::path train_root = data_root / "train";
+  std::string root = ".";
+  if (argc >= 2) root = argv[1];
+  std::string data_train = root + "/data/train/";
+  std::string labels_path = root + "/data/train_labels.parquet";
+  std::string out_dir = root + "/output/";
+  std::string out_path = out_dir + "full_dataset";
 
-        std::vector<fs::path> pretrain_paths = {
-            train_root / "pretrain_part_1.parquet",
-            train_root / "pretrain_part_2.parquet",
-            train_root / "pretrain_part_3.parquet",
-        };
-        std::vector<fs::path> train_paths = {
-            train_root / "train_part_1.parquet",
-            train_root / "train_part_2.parquet",
-            train_root / "train_part_3.parquet",
-        };
-        fs::path labels_path = data_root / "train_labels.parquet";
-        fs::path out_dir = project_root / "output";
+  log_msg("repo_root=" + root + " out_path=" + out_path);
 
-        std::cout << "Loading labels from " << labels_path << std::endl;
-        auto labels = load_train_labels(labels_path);
-        std::cout << "Loaded " << labels.size() << " labeled events\n";
+  std::error_code fs_ec;
+  std::filesystem::create_directories(out_dir, fs_ec);
+  if (fs_ec) {
+    std::cerr << "[build_dataset] Cannot create directory: " << out_dir << " — " << fs_ec.message() << "\n";
+    return 1;
+  }
 
-        std::unordered_map<std::string, WindowedAggregates> win_aggs;
-        std::cout << "Building windowed aggregates from pretrain...\n";
-        build_windowed_from_pretrain(pretrain_paths, win_aggs);
-        std::cout << "Pretrain users: " << win_aggs.size() << "\n";
+  std::unordered_map<int64_t, int> labels_orig;
+  if (!load_labels(labels_path, &labels_orig).ok()) {
+    std::cerr << "[build_dataset] Failed to read labels: " << labels_path << "\n";
+    return 1;
+  }
+  log_msg("labels event_ids=" + std::to_string(labels_orig.size()) + " path=" + labels_path);
 
-        std::cout << "Processing train files...\n";
-        fs::create_directories(out_dir);
-        int64_t total_rows = process_train_sequential(train_paths, labels, win_aggs, out_dir);
-        std::cout << "Done, total rows: " << total_rows << std::endl;
-        return 0;
-    } catch (const std::exception& ex) {
-        std::cerr << "ERROR: " << ex.what() << std::endl;
-        return 1;
+  DatasetWriter wr(out_path);
+  std::unordered_map<std::string, UserWindow> windows;
+
+  std::vector<std::string> pre = {data_train + "pretrain_part_1.parquet", data_train + "pretrain_part_2.parquet",
+                                  data_train + "pretrain_part_3.parquet"};
+  std::vector<std::string> tr = {data_train + "train_part_1.parquet", data_train + "train_part_2.parquet",
+                                 data_train + "train_part_3.parquet"};
+
+  log_msg("phase: pretrain files (window fill, no dataset rows)");
+  for (const auto& p : pre) {
+    std::ifstream f(p);
+    if (!f.good()) {
+      log_msg("skip missing: " + p);
+      continue;
     }
+    auto st = process_file(p, false, &windows, labels_orig, &wr);
+    if (!st.ok()) {
+      std::cerr << "[build_dataset] " << st.ToString() << "\n";
+      return 1;
+    }
+  }
+  log_msg("phase: train files (dataset rows + window)");
+  for (const auto& p : tr) {
+    std::ifstream f(p);
+    if (!f.good()) {
+      log_msg("skip missing: " + p);
+      continue;
+    }
+    auto st = process_file(p, true, &windows, labels_orig, &wr);
+    if (!st.ok()) {
+      std::cerr << "[build_dataset] " << st.ToString() << "\n";
+      return 1;
+    }
+  }
+  log_msg("final flush/close output parquet …");
+  if (!wr.close().ok()) return 1;
+  log_msg("Done. unique customers in window map: " + std::to_string(windows.size()));
+  return 0;
 }
-

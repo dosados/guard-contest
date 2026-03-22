@@ -1,185 +1,200 @@
 """
-Точка входа 2: разбиение данных, обучение моделей (CatBoost, XGBoost, LightGBM),
-валидация, сохранение весов и вывод метрик по всем моделям.
-
-Загружает датасет из output/train_dataset.parquet (созданный dataset/main.py),
-делит на train/val, обучает четыре модели (CatBoost, XGBoost, LightGBM, PyTorch MLP),
-считает PR-AUC на валидации для каждой, сохраняет веса в output/ и выводит сводную таблицу метрик.
-
-Конфиг моделей и VAL_RATIO — в training/config.py.
-
-Запуск из корня репозитория:
-  PYTHONPATH=. python training/main.py
+Побатчевое обучение бустингов из объединённого train_dataset.parquet.
+Чтение идёт батчами через pyarrow + tqdm, без загрузки всего датасета в RAM.
 """
 
 from __future__ import annotations
 
 import logging
 import sys
+from collections import Counter
 from pathlib import Path
 
-# Корень проекта в sys.path до импортов shared/training
+import numpy as np
+import pandas as pd
+import pyarrow.parquet as pq
+from sklearn.metrics import average_precision_score
+from tqdm import tqdm
+
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-import numpy as np
-import pandas as pd
-from catboost import CatBoostClassifier
-from sklearn.metrics import average_precision_score
-import xgboost as xgb
-import lightgbm as lgb
+from shared.config import MODEL_LGB_PATH, MODEL_XGB_PATH, TRAIN_DATASET_PATH, resolve_model_input_columns
+from training.config import CATBOOST_PARAMS, LGBM_PARAMS, VAL_RATIO, XGB_PARAMS
 
-from shared.config import (
-    MODEL_PATH,
-    MODEL_LGB_PATH,
-    MODEL_PYTORCH_PATH,
-    MODEL_XGB_PATH,
-    TRAIN_DATASET_PATH,
-)
-from training.config import (
-    CATBOOST_PARAMS,
-    LGBM_PARAMS,
-    PYTORCH_PARAMS,
-    VAL_RATIO,
-    XGB_PARAMS,
-)
-from training.pytorch_model import train_and_validate, save_model as save_pytorch_model
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-TARGET_COLUMN = "target"
+
+def _prepare_batch(dfb: pd.DataFrame, feature_cols: list[str]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    x = dfb[feature_cols].apply(pd.to_numeric, errors="coerce").astype(np.float32).to_numpy(copy=False)
+    y = pd.to_numeric(dfb["target"], errors="coerce").fillna(0).astype(np.int32).to_numpy(copy=False)
+    w = pd.to_numeric(dfb["sample_weight"], errors="coerce").fillna(1.0).astype(np.float32).to_numpy(copy=False)
+    return x, y, w
+
+
+def _detect_columns(path: Path) -> tuple[list[str], str]:
+    pf = pq.ParquetFile(path)
+    names = pf.schema_arrow.names
+    feature_cols = resolve_model_input_columns(names)
+    if "event_dttm" not in names:
+        raise ValueError("В датасете нет колонки event_dttm")
+    if "target" not in names or "sample_weight" not in names:
+        raise ValueError("В датасете нет target/sample_weight")
+    return feature_cols, "event_dttm"
+
+
+def _find_time_cutoff(path: Path, val_ratio: float, batch_size: int = 2_500_000) -> pd.Timestamp:
+    """Определяем time-cutoff по дням без полной загрузки датасета."""
+    pf = pq.ParquetFile(path)
+    by_day: Counter[pd.Timestamp] = Counter()
+    total = 0
+    for rb in tqdm(pf.iter_batches(columns=["event_dttm"], batch_size=batch_size), desc="Скан дат", unit="batch"):
+        s = pd.to_datetime(rb.column(0).to_pandas(), errors="coerce").dt.floor("D")
+        vc = s.value_counts(dropna=True)
+        for k, v in vc.items():
+            by_day[k] += int(v)
+            total += int(v)
+    if total == 0:
+        raise ValueError("Не удалось прочитать event_dttm для split по времени.")
+    val_target = max(1, int(total * val_ratio))
+    acc = 0
+    cutoff = None
+    for day, cnt in sorted(by_day.items(), reverse=True):
+        acc += cnt
+        cutoff = day
+        if acc >= val_target:
+            break
+    assert cutoff is not None
+    logger.info("Time split cutoff day: %s (val target rows ~= %d)", cutoff.date(), val_target)
+    return cutoff
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
     if not TRAIN_DATASET_PATH.exists():
         raise FileNotFoundError(
-            f"Run dataset/main.py first to create {TRAIN_DATASET_PATH}"
+            f"Не найден {TRAIN_DATASET_PATH}. "
+            "Сначала соберите датасет: ./dataset_cpp/build/build_dataset ."
         )
-    logger.info("Loading dataset from %s", TRAIN_DATASET_PATH)
-    df = pd.read_parquet(TRAIN_DATASET_PATH)
-    non_feature_columns = {"event_id", TARGET_COLUMN, "event_dttm", "sample_weight"}
-    feature_columns = [c for c in df.columns if c not in non_feature_columns]
-    if not feature_columns:
-        raise ValueError("No feature columns in dataset (expected columns other than event_id, target, event_dttm)")
-    if TARGET_COLUMN not in df.columns:
-        raise ValueError(f"Missing column: {TARGET_COLUMN}")
-    if "event_dttm" not in df.columns:
-        raise ValueError(
-            "Dataset must contain event_dttm for time-based split. Re-run dataset/main.py."
-        )
+    feature_cols, dttm_col = _detect_columns(TRAIN_DATASET_PATH)
+    cutoff_day = _find_time_cutoff(TRAIN_DATASET_PATH, VAL_RATIO)
+    pf = pq.ParquetFile(TRAIN_DATASET_PATH)
 
-    # Разбиение по времени: сортируем по event_dttm, val = последние VAL_RATIO
-    df = df.copy()
-    df["event_dttm"] = pd.to_datetime(df["event_dttm"], errors="coerce")
-    df = df.sort_values("event_dttm", na_position="first").reset_index(drop=True)
-    n = len(df)
-    n_val = int(n * VAL_RATIO)
-    n_train = n - n_val
-    train_idx = df.index[:n_train].tolist()
-    val_idx = df.index[n_train:].tolist()
-    X_train = df.loc[train_idx, feature_columns]
-    y_train = df.loc[train_idx, TARGET_COLUMN]
-    X_val = df.loc[val_idx, feature_columns]
-    y_val = df.loc[val_idx, TARGET_COLUMN]
+    results: list[tuple[str, float]] = []
 
-    sample_weight_train = df.loc[train_idx, "sample_weight"] if "sample_weight" in df.columns else None
-    sample_weight_val = df.loc[val_idx, "sample_weight"] if "sample_weight" in df.columns else None
-    logger.info(
-        "Time-based split: train=%s (first by time), val=%s (last by time)",
-        len(X_train),
-        len(X_val),
-    )
+    logger.warning("CatBoost отключен в streaming-режиме: нет стабильного побатчевого обучения без загрузки всего train в память.")
 
-    MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
-    metrics: list[tuple[str, float]] = []
+    # --- XGBoost: побатчевое дообучение ---
+    try:
+        import xgboost as xgb
 
-    # --- CatBoost ---
-    logger.info("Training CatBoost...")
-    model_cb = CatBoostClassifier(**CATBOOST_PARAMS)
-    model_cb.fit(
-        X_train, y_train,
-        sample_weight=sample_weight_train,
-        eval_set=(X_val, y_val),
-        eval_sample_weight=sample_weight_val,
-        verbose=CATBOOST_PARAMS.get("verbose", 100),
-    )
-    logger.info("CatBoost fit done, computing validation PR-AUC...")
-    X_val_cb = np.ascontiguousarray(X_val.fillna(0).values)
-    pr_auc_cb = average_precision_score(y_val, model_cb.predict_proba(X_val_cb)[:, 1])
-    metrics.append(("CatBoost", pr_auc_cb))
-    logger.info("Saving CatBoost model...")
-    model_cb.save_model(str(MODEL_PATH))
-    logger.info("CatBoost PR-AUC: %.4f, saved to %s", pr_auc_cb, MODEL_PATH)
+        params = {
+            "objective": "binary:logistic",
+            "eval_metric": "aucpr",
+            "eta": XGB_PARAMS.get("learning_rate", 0.05),
+            "max_depth": XGB_PARAMS.get("max_depth", 8),
+            "subsample": XGB_PARAMS.get("subsample", 0.8),
+            "colsample_bytree": XGB_PARAMS.get("colsample_bytree", 0.8),
+            "tree_method": XGB_PARAMS.get("tree_method", "hist"),
+            "seed": XGB_PARAMS.get("random_state", 42),
+        }
+        booster = None
+        rounds_per_batch = 1
+        y_val_all: list[np.ndarray] = []
+        p_val_all: list[np.ndarray] = []
+        for rb in tqdm(
+            pf.iter_batches(columns=feature_cols + ["target", "sample_weight", dttm_col], batch_size=2_000_000),
+            desc="XGBoost stream fit",
+            unit="batch",
+        ):
+            dfb = rb.to_pandas()
+            dttm = pd.to_datetime(dfb[dttm_col], errors="coerce")
+            train_mask = dttm < cutoff_day
+            val_mask = ~train_mask
 
-    # --- XGBoost ---
-    logger.info("Training XGBoost...")
-    model_xgb = xgb.XGBClassifier(**XGB_PARAMS)
-    model_xgb.fit(
-        X_train, y_train,
-        sample_weight=sample_weight_train,
-        eval_set=[(X_val, y_val)],
-        eval_sample_weight=[sample_weight_val] if sample_weight_val is not None else None,
-        verbose=100,
-    )
-    pr_auc_xgb = average_precision_score(y_val, model_xgb.predict_proba(X_val)[:, 1])
-    metrics.append(("XGBoost", pr_auc_xgb))
-    model_xgb.save_model(str(MODEL_XGB_PATH))
-    logger.info("XGBoost PR-AUC: %.4f, saved to %s", pr_auc_xgb, MODEL_XGB_PATH)
+            if train_mask.any():
+                xtr, ytr, wtr = _prepare_batch(dfb.loc[train_mask], feature_cols)
+                dtrain = xgb.DMatrix(xtr, label=ytr, weight=wtr, feature_names=feature_cols)
+                booster = xgb.train(params=params, dtrain=dtrain, num_boost_round=rounds_per_batch, xgb_model=booster)
 
-    # --- LightGBM ---
-    logger.info("Training LightGBM...")
-    model_lgb = lgb.LGBMClassifier(**LGBM_PARAMS)
-    model_lgb.fit(
-        X_train, y_train,
-        sample_weight=sample_weight_train,
-        eval_set=[(X_val, y_val)],
-        eval_sample_weight=[sample_weight_val] if sample_weight_val is not None else None,
-        callbacks=[lgb.log_evaluation(100)],
-    )
-    pr_auc_lgb = average_precision_score(y_val, model_lgb.predict_proba(X_val)[:, 1])
-    metrics.append(("LightGBM", pr_auc_lgb))
-    model_lgb.booster_.save_model(str(MODEL_LGB_PATH))
-    logger.info("LightGBM PR-AUC: %.4f, saved to %s", pr_auc_lgb, MODEL_LGB_PATH)
+            if val_mask.any() and booster is not None:
+                xva, yva, _ = _prepare_batch(dfb.loc[val_mask], feature_cols)
+                dval = xgb.DMatrix(xva, label=yva, feature_names=feature_cols)
+                p = booster.predict(dval)
+                y_val_all.append(yva)
+                p_val_all.append(p.astype(np.float32))
 
-    # --- PyTorch MLP ---
-    logger.info("Training PyTorch MLP...")
-    X_train_np = X_train.fillna(0).values
-    X_val_np = X_val.fillna(0).values
-    y_train_np = y_train.values
-    y_val_np = y_val.values
-    w_train_np = sample_weight_train.values.astype(np.float32) if sample_weight_train is not None else None
-    w_val_np = sample_weight_val.values.astype(np.float32) if sample_weight_val is not None else None
-    model_pt, pr_auc_pt = train_and_validate(
-        X_train_np,
-        y_train_np,
-        X_val_np,
-        y_val_np,
-        sample_weight_train=w_train_np,
-        sample_weight_val=w_val_np,
-        **PYTORCH_PARAMS,
-    )
-    metrics.append(("PyTorch MLP", pr_auc_pt))
-    save_pytorch_model(model_pt, MODEL_PYTORCH_PATH)
-    logger.info("PyTorch MLP PR-AUC: %.4f, saved to %s", pr_auc_pt, MODEL_PYTORCH_PATH)
+        if booster is None:
+            raise RuntimeError("XGBoost не обучился: нет train-батчей после split.")
+        pr = average_precision_score(np.concatenate(y_val_all), np.concatenate(p_val_all))
+        results.append(("XGBoost", float(pr)))
+        booster.save_model(str(MODEL_XGB_PATH))
+        logger.info("XGBoost PR-AUC (val): %.6f → %s", pr, MODEL_XGB_PATH)
+    except Exception as e:
+        logger.warning("XGBoost пропущен: %s", e)
 
-    # Сводка метрик
-    logger.info("=" * 50)
-    logger.info("Validation PR-AUC (all models):")
-    for name, pr_auc in metrics:
-        logger.info("  %s: %.4f", name, pr_auc)
-    best_name, best_auc = max(metrics, key=lambda x: x[1])
-    logger.info("Best: %s (PR-AUC %.4f)", best_name, best_auc)
-    logger.info("=" * 50)
-    print("\n--- Validation PR-AUC ---")
-    print(f"{'Model':<12}  PR-AUC")
-    print("-" * 24)
-    for name, pr_auc in metrics:
-        print(f"{name:<12}  {pr_auc:.4f}")
-    print("-" * 24)
-    print(f"Best: {best_name} ({best_auc:.4f})")
-    print()
+    # --- LightGBM: побатчевое дообучение ---
+    try:
+        import lightgbm as lgb
+
+        params = {
+            "objective": "binary",
+            "metric": "average_precision",
+            "learning_rate": LGBM_PARAMS.get("learning_rate", 0.05),
+            "num_leaves": LGBM_PARAMS.get("num_leaves", 64),
+            "max_depth": LGBM_PARAMS.get("max_depth", -1),
+            "feature_fraction": LGBM_PARAMS.get("colsample_bytree", 0.8),
+            "bagging_fraction": LGBM_PARAMS.get("subsample", 0.8),
+            "verbose": -1,
+            "seed": LGBM_PARAMS.get("random_state", 42),
+        }
+        booster = None
+        rounds_per_batch = 1
+        y_val_all = []
+        p_val_all = []
+        for rb in tqdm(
+            pf.iter_batches(columns=feature_cols + ["target", "sample_weight", dttm_col], batch_size=2_000_000),
+            desc="LightGBM stream fit",
+            unit="batch",
+        ):
+            dfb = rb.to_pandas()
+            dttm = pd.to_datetime(dfb[dttm_col], errors="coerce")
+            train_mask = dttm < cutoff_day
+            val_mask = ~train_mask
+
+            if train_mask.any():
+                xtr, ytr, wtr = _prepare_batch(dfb.loc[train_mask], feature_cols)
+                Xtr = pd.DataFrame(xtr, columns=feature_cols)
+                dtrain = lgb.Dataset(Xtr, label=ytr, weight=wtr, free_raw_data=True)
+                booster = lgb.train(params, dtrain, num_boost_round=rounds_per_batch, init_model=booster, keep_training_booster=True)
+
+            if val_mask.any() and booster is not None:
+                xva, yva, _ = _prepare_batch(dfb.loc[val_mask], feature_cols)
+                Xva = pd.DataFrame(xva, columns=feature_cols)
+                p = booster.predict(Xva)
+                y_val_all.append(yva)
+                p_val_all.append(np.asarray(p, dtype=np.float32))
+
+        if booster is None:
+            raise RuntimeError("LightGBM не обучился: нет train-батчей после split.")
+        pr = average_precision_score(np.concatenate(y_val_all), np.concatenate(p_val_all))
+        results.append(("LightGBM", float(pr)))
+        booster.save_model(str(MODEL_LGB_PATH))
+        logger.info("LightGBM PR-AUC (val): %.6f → %s", pr, MODEL_LGB_PATH)
+    except Exception as e:
+        logger.warning("LightGBM пропущен: %s", e)
+
+    logger.info("=== Сводка PR-AUC (валидация по времени) ===")
+    for name, pr in sorted(results, key=lambda x: -x[1]):
+        logger.info("  %s: %.6f", name, pr)
+    if results:
+        best = max(results, key=lambda x: x[1])
+        logger.info("Лучшая по PR-AUC: %s (%.6f)", best[0], best[1])
 
 
 if __name__ == "__main__":

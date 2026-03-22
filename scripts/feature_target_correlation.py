@@ -1,8 +1,8 @@
 """
 Скрипт для анализа фичей, коррелирующих с таргетом.
 
-После создания датасета (dataset/main.py) и при необходимости обучения (training/main.py):
-  - загружает output/train_dataset.parquet;
+После создания датасета (dataset_cpp/build_dataset) и при необходимости обучения (training/main.py):
+  - загружает train_dataset (части C++ или один parquet);
   - считает корреляцию каждой фичи с target (point-biserial для бинарного таргета);
   - если есть обученная модель CatBoost (output/model.cbm), добавляет важность фичей;
   - строит графики и сохраняет таблицу в output/.
@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
@@ -24,10 +25,14 @@ if str(_PROJECT_ROOT) not in sys.path:
 import numpy as np
 import pandas as pd
 
-from shared.config import OUTPUT_DIR, TRAIN_DATASET_PATH, MODEL_PATH
+from shared.config import OUTPUT_DIR, MODEL_PATH
+from shared.train_dataset import load_train_dataframe, train_dataset_is_available
+from tqdm import tqdm
+
+logger = logging.getLogger(__name__)
 
 TARGET_COLUMN = "target"
-NON_FEATURE_COLUMNS = {"event_id", TARGET_COLUMN, "event_dttm"}
+NON_FEATURE_COLUMNS = {"event_id", TARGET_COLUMN, "event_dttm", "sample_weight"}
 
 
 def get_feature_columns(df: pd.DataFrame) -> list[str]:
@@ -38,7 +43,7 @@ def correlation_with_target(df: pd.DataFrame, feature_columns: list[str]) -> pd.
     """Корреляция каждой фичи с бинарным target (Pearson = point-biserial)."""
     y = df[TARGET_COLUMN].astype(float)
     corrs = {}
-    for col in feature_columns:
+    for col in tqdm(feature_columns, desc="corr(feature, target)", unit="feat"):
         x = pd.to_numeric(df[col], errors="coerce")
         valid = x.notna() & y.notna()
         if valid.sum() < 10:
@@ -113,26 +118,31 @@ def plot_importance_bars(importance: pd.Series, out_path: Path, title: str = "В
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
     parser = argparse.ArgumentParser(description="Feature-target correlation and optional CatBoost importance")
     parser.add_argument("--no-plot", action="store_true", help="Only save CSV, do not build plots")
     parser.add_argument("--top", type=int, default=40, help="Number of features to show on bar charts (default: 40)")
     args = parser.parse_args()
 
-    if not TRAIN_DATASET_PATH.exists():
-        print(f"Dataset not found: {TRAIN_DATASET_PATH}. Run dataset/main.py first.", file=sys.stderr)
+    if not train_dataset_is_available():
+        logger.error("Dataset not found. Соберите датасет (dataset_cpp/build_dataset).")
         sys.exit(1)
 
-    print("Loading dataset...")
-    df = pd.read_parquet(TRAIN_DATASET_PATH)
+    logger.info("Загрузка датасета …")
+    df = load_train_dataframe()
     feature_columns = get_feature_columns(df)
     if not feature_columns:
-        print("No feature columns in dataset.", file=sys.stderr)
+        logger.error("No feature columns in dataset.")
         sys.exit(1)
     if TARGET_COLUMN not in df.columns:
-        print(f"Missing column: {TARGET_COLUMN}", file=sys.stderr)
+        logger.error("Missing column: %s", TARGET_COLUMN)
         sys.exit(1)
 
-    print("Computing correlations with target...")
+    logger.info("Корреляции с target (%d фичей) …", len(feature_columns))
     corrs = correlation_with_target(df, feature_columns)
 
     out_table = pd.DataFrame({"feature": corrs.index, "correlation": corrs.values})
@@ -140,7 +150,7 @@ def main() -> None:
 
     csv_path = OUTPUT_DIR / "feature_target_correlation.csv"
     out_table.to_csv(csv_path, index=False)
-    print(f"Saved: {csv_path}")
+    logger.info("Saved: %s", csv_path)
 
     if not args.no_plot:
         try:
@@ -150,9 +160,9 @@ def main() -> None:
                 title="Корреляция фичей с target (топ по |r|)",
                 top_n=args.top,
             )
-            print(f"Saved: {OUTPUT_DIR / 'feature_target_correlation.png'}")
+            logger.info("Saved: %s", OUTPUT_DIR / "feature_target_correlation.png")
         except ImportError:
-            print("matplotlib not available, skipping correlation plot.", file=sys.stderr)
+            logger.warning("matplotlib not available, skipping correlation plot.")
 
     importance = load_catboost_importance(MODEL_PATH, feature_columns)
     if importance is not None:
@@ -160,7 +170,7 @@ def main() -> None:
         imp_table = imp_table.sort_values("importance", ascending=False).reset_index(drop=True)
         imp_csv = OUTPUT_DIR / "feature_importance_catboost.csv"
         imp_table.to_csv(imp_csv, index=False)
-        print(f"CatBoost importance saved: {imp_csv}")
+        logger.info("CatBoost importance saved: %s", imp_csv)
         if not args.no_plot:
             try:
                 plot_importance_bars(
@@ -169,13 +179,13 @@ def main() -> None:
                     title="Важность фичей (CatBoost)",
                     top_n=args.top,
                 )
-                print(f"Saved: {OUTPUT_DIR / 'feature_importance_catboost.png'}")
+                logger.info("Saved: %s", OUTPUT_DIR / "feature_importance_catboost.png")
             except ImportError:
-                print("matplotlib not available, skipping importance plot.", file=sys.stderr)
+                logger.warning("matplotlib not available, skipping importance plot.")
     else:
-        print("CatBoost model not found, skipping feature importance. Run training/main.py to train.")
+        logger.info("CatBoost model not found, skipping feature importance. Run training/main.py to train.")
 
-    print("\nTop 15 features by |correlation| with target:")
+    logger.info("Top 15 features by |correlation| with target:")
     print(out_table.head(15).to_string(index=False))
 
 

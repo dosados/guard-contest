@@ -1,11 +1,14 @@
+# Окружение для сборки dataset_cpp (CMake + make + компилятор C++).
+# conda env create -f requirements/environment_cpp.yml
+# conda activate guard-cpp
 name: guard-cpp
 channels:
+  - conda-forge
   - defaults
 dependencies:
-  - cmake
-  - compilers
+  - cmake>=3.16
+  - make
+  - cxx-compiler
   - openssl
-  - ninja
   - arrow-cpp
   - parquet-cpp
-prefix: /home/timofey/miniconda3/envs/guard-cpp

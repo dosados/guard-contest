@@ -1,55 +1,63 @@
-"""
-Конфигурация обучения: параметры модели, разбиение train/val.
-Меняй здесь для экспериментов с разными моделями и долей валидации.
-"""
+"""Параметры обучения и валидации."""
 
-# Доля данных для валидации (остальное — обучение)
-VAL_RATIO = 0.3
+from __future__ import annotations
+
+import logging
+
+# Список признаков на вход модели и исключения: shared.config.MODEL_INPUT_FEATURES, MODEL_FEATURES_EXCLUDED.
+
+logger = logging.getLogger(__name__)
+
+# Доля валидации по времени (последние VAL_RATIO строк после сортировки по event_dttm)
+VAL_RATIO = 0.15
 RANDOM_SEED = 42
 
-# Параметры CatBoost
-# task_type="CPU" и thread_count избегают зависаний после обучения (GPU/многопоточность)
 CATBOOST_PARAMS = {
-    "iterations": 500,
-    "learning_rate": 0.1,
-    "depth": 6,
+    "iterations": 800,
+    "depth": 8,
+    "learning_rate": 0.05,
     "loss_function": "Logloss",
     "eval_metric": "PRAUC",
+    "random_seed": RANDOM_SEED,
     "verbose": 100,
-    "random_seed": 42,
-    "task_type": "CPU",
-    "thread_count": 4,
 }
 
-# Параметры XGBoost
 XGB_PARAMS = {
-    "n_estimators": 500,
-    "learning_rate": 0.1,
-    "max_depth": 6,
-    "objective": "binary:logistic",
+    "n_estimators": 600,
+    "max_depth": 8,
+    "learning_rate": 0.05,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "random_state": RANDOM_SEED,
+    "tree_method": "hist",
     "eval_metric": "aucpr",
-    "random_state": 42,
-    "use_label_encoder": False,
-    "verbosity": 0,
 }
 
-# Параметры LightGBM
 LGBM_PARAMS = {
-    "n_estimators": 500,
-    "learning_rate": 0.1,
-    "max_depth": 6,
-    "objective": "binary",
-    "metric": "average_precision",
-    "random_state": 42,
-    "verbosity": -1,
+    "n_estimators": 800,
+    "max_depth": -1,
+    "learning_rate": 0.05,
+    "num_leaves": 64,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "random_state": RANDOM_SEED,
+    "verbose": -1,
 }
 
-# Параметры PyTorch MLP
-PYTORCH_PARAMS = {
-    "hidden_sizes": (128, 64),
-    "epochs": 50,
-    "batch_size": 2048,
-    "lr": 1e-3,
-    "dropout": 0.2,
-    "verbose": 10,
+RF_PARAMS = {
+    "n_estimators_total": 400,
+    "trees_per_batch": 8,
+    "max_depth": 18,
+    "max_features": "sqrt",
+    "min_samples_leaf": 8,
+    "n_jobs": -1,
+    "random_state": RANDOM_SEED,
+}
+
+LR_PARAMS = {
+    "alpha": 1e-4,
+    "penalty": "l2",
+    "fit_intercept": True,
+    "max_iter_per_batch": 1,
+    "random_state": RANDOM_SEED,
 }

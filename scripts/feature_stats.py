@@ -1,8 +1,8 @@
 """
 Скрипт для сравнения средних значений фичей на train и test.
 
-Считает df_train[FEATURE_NAMES].mean() и df_test[FEATURE_NAMES].mean():
-  - train: из output/train_dataset.parquet
+Считает средние по колонкам MODEL_INPUT_FEATURES (shared/config.py) на train и test:
+  - train: из output/train_dataset_part_*.parquet или output/train_dataset.parquet
   - test: фичи считаются по pretest + test (как в submission), затем mean() по строкам.
 
 Запуск из корня репозитория:
@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
@@ -22,12 +23,8 @@ import pandas as pd
 import pyarrow.parquet as pq
 from collections import defaultdict
 
-from shared.config import (
-    BATCH_SIZE,
-    PRETEST_PATH,
-    TEST_PATH,
-    TRAIN_DATASET_PATH,
-)
+from shared.config import BATCH_SIZE, MODEL_INPUT_FEATURES, PRETEST_PATH, TEST_PATH
+from shared.train_dataset import load_train_dataframe, train_dataset_is_available
 from shared.features import FEATURE_NAMES, compute_features
 from shared.parquet_batch_aggregates import (
     CUSTOMER_ID_COLUMN,
@@ -36,25 +33,34 @@ from shared.parquet_batch_aggregates import (
     UserAggregates,
     build_user_aggregates,
 )
+from tqdm import tqdm
+
+logger = logging.getLogger(__name__)
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
     # --- Train: из датасета ---
-    if not TRAIN_DATASET_PATH.exists():
-        print(f"Train dataset not found: {TRAIN_DATASET_PATH}. Run dataset/main.py first.")
+    if not train_dataset_is_available():
+        logger.error("Train dataset not found. Соберите датасет (dataset_cpp/build_dataset).")
         sys.exit(1)
-    df_train = pd.read_parquet(TRAIN_DATASET_PATH)
+    df_train = load_train_dataframe()
     for c in FEATURE_NAMES:
         if c not in df_train.columns:
-            print(f"Missing column in train: {c}")
+            logger.error("Missing column in train: %s", c)
             sys.exit(1)
-    mean_train = df_train[FEATURE_NAMES].mean()
+    mean_train = df_train[MODEL_INPUT_FEATURES].mean()
+    logger.info("Train: %d строк, средние по фичам посчитаны", len(df_train))
 
     # --- Test: агрегаты по pretest, затем фичи по каждой строке test ---
     pretest_paths = [PRETEST_PATH] if isinstance(PRETEST_PATH, Path) else list(PRETEST_PATH)
     pretest_paths = [p for p in pretest_paths if p.exists()]
     if not pretest_paths:
-        print("Pretest not found, test features will use empty aggregates.")
+        logger.warning("Pretest not found, test features will use empty aggregates.")
     aggregates = defaultdict(
         UserAggregates,
         build_user_aggregates(pretest_paths, batch_size=BATCH_SIZE, show_progress=True)
@@ -62,7 +68,7 @@ def main() -> None:
         else {},
     )
     if not TEST_PATH.exists():
-        print(f"Test file not found: {TEST_PATH}")
+        logger.error("Test file not found: %s", TEST_PATH)
         sys.exit(1)
     pf = pq.ParquetFile(TEST_PATH)
     schema = pf.schema_arrow
@@ -70,29 +76,33 @@ def main() -> None:
     if EVENT_ID_COLUMN not in columns:
         columns.append(EVENT_ID_COLUMN)
     rows: list[dict[str, float]] = []
-    for batch in pf.iter_batches(columns=columns, batch_size=BATCH_SIZE):
-        col_lists = {name: batch.column(name).to_pylist() for name in batch.schema.names}
-        n = batch.num_rows
-        for i in range(n):
-            row = {name: col_lists[name][i] for name in batch.schema.names}
-            cid = row.get(CUSTOMER_ID_COLUMN)
-            if cid is None:
-                continue
-            feats = compute_features(aggregates[cid], row)
-            aggregates[cid].update(row)
-            rows.append(feats)
-    df_test = pd.DataFrame(rows)[FEATURE_NAMES]
+    total_rows = int(pf.metadata.num_rows)
+    with tqdm(total=total_rows, desc="test rows (features)", unit="row") as pbar:
+        for batch in pf.iter_batches(columns=columns, batch_size=BATCH_SIZE):
+            col_lists = {name: batch.column(name).to_pylist() for name in batch.schema.names}
+            n = batch.num_rows
+            for i in range(n):
+                row = {name: col_lists[name][i] for name in batch.schema.names}
+                cid = row.get(CUSTOMER_ID_COLUMN)
+                if cid is None:
+                    pbar.update(1)
+                    continue
+                feats = compute_features(aggregates[cid], row)
+                aggregates[cid].update(row)
+                rows.append(feats)
+                pbar.update(1)
+    df_test = pd.DataFrame(rows)[MODEL_INPUT_FEATURES]
     mean_test = df_test.mean()
 
     # --- Вывод ---
-    print("=" * 70)
-    print("Feature means: train vs test")
-    print("=" * 70)
+    logger.info("=" * 70)
+    logger.info("Feature means: train vs test")
+    logger.info("=" * 70)
     out = pd.DataFrame({"train": mean_train, "test": mean_test})
     out["diff"] = out["test"] - out["train"]
     print(out.to_string())
-    print("=" * 70)
-    print(f"Train rows: {len(df_train)}, Test rows: {len(df_test)}")
+    logger.info("=" * 70)
+    logger.info("Train rows: %d, Test rows: %d", len(df_train), len(df_test))
 
 
 if __name__ == "__main__":

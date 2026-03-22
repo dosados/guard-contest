@@ -1,0 +1,36 @@
+freq(device) / total_tx
+count(device)
+days_since_last_seen(device)
+
+вместо is_new;
+
+
+event_descr_freq;
+event_type_nm_freq;
+
+
+вместо нынешнего is_compromised должно быть так - 0, если compromised = nan или 0, и 1 если там 1;
+
+log(1 + tr_amount)
++ нормировать другие фичи на него
+
+transactions_last_10m / transactions_last_1h
+transactions_last_1h / transactions_last_24h
+sum_1h / sum_24h
+
+time_since_prev_transaction
+time_since_2nd_prev
+mean_time_between_tx
+std_time_between_tx
+
+
+time_since_last_device
+time_since_last_mcc
+time_since_last_channel
+
+amount / last_amount
+amount / max_amount_last_24h
+transactions_last_1h / (transactions_last_24h + 1)
+time_since_prev / mean_time_between_tx
+device_count / tr_amount
+mcc_count / tr_amount

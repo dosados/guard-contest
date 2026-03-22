@@ -45,19 +45,19 @@ cmake_force:
 SHELL = /bin/sh
 
 # The CMake executable.
-CMAKE_COMMAND = /home/timofey/miniconda3/envs/guard-cpp/bin/cmake
+CMAKE_COMMAND = /home/mants/miniconda3/envs/guard-cpp/bin/cmake
 
 # The command to remove a file.
-RM = /home/timofey/miniconda3/envs/guard-cpp/bin/cmake -E rm -f
+RM = /home/mants/miniconda3/envs/guard-cpp/bin/cmake -E rm -f
 
 # Escaping for special characters.
 EQUALS = =
 
 # The top-level source directory on which CMake was run.
-CMAKE_SOURCE_DIR = /home/timofey/Documents/own/guard-contest/dataset_cpp
+CMAKE_SOURCE_DIR = /home/mants/Documents/own/guard-contest/dataset_cpp
 
 # The top-level build directory on which CMake was run.
-CMAKE_BINARY_DIR = /home/timofey/Documents/own/guard-contest/dataset_cpp/build
+CMAKE_BINARY_DIR = /home/mants/Documents/own/guard-contest/dataset_cpp/build
 
 #=============================================================================
 # Directory level rules for the build root directory
@@ -85,14 +85,14 @@ clean: CMakeFiles/build_dataset.dir/clean
 CMakeFiles/build_dataset.dir/all:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/build_dataset.dir/build.make CMakeFiles/build_dataset.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/build_dataset.dir/build.make CMakeFiles/build_dataset.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/timofey/Documents/own/guard-contest/dataset_cpp/build/CMakeFiles --progress-num=1,2 "Built target build_dataset"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/mants/Documents/own/guard-contest/dataset_cpp/build/CMakeFiles --progress-num=1,2 "Built target build_dataset"
 .PHONY : CMakeFiles/build_dataset.dir/all
 
 # Build rule for subdir invocation for target.
 CMakeFiles/build_dataset.dir/rule: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/timofey/Documents/own/guard-contest/dataset_cpp/build/CMakeFiles 2
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/mants/Documents/own/guard-contest/dataset_cpp/build/CMakeFiles 2
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/build_dataset.dir/all
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/timofey/Documents/own/guard-contest/dataset_cpp/build/CMakeFiles 0
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/mants/Documents/own/guard-contest/dataset_cpp/build/CMakeFiles 0
 .PHONY : CMakeFiles/build_dataset.dir/rule
 
 # Convenience name for target.
@@ -102,7 +102,7 @@ build_dataset: CMakeFiles/build_dataset.dir/rule
 # codegen rule for target.
 CMakeFiles/build_dataset.dir/codegen:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/build_dataset.dir/build.make CMakeFiles/build_dataset.dir/codegen
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/timofey/Documents/own/guard-contest/dataset_cpp/build/CMakeFiles --progress-num=1,2 "Finished codegen for target build_dataset"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/mants/Documents/own/guard-contest/dataset_cpp/build/CMakeFiles --progress-num=1,2 "Finished codegen for target build_dataset"
 .PHONY : CMakeFiles/build_dataset.dir/codegen
 
 # clean rule for target.

@@ -1,0 +1,274 @@
+Агрегаты датасета и фичи модели (по текущему коду)
+
+Источники:
+- shared/features.py (FEATURE_NAMES, compute_features, константа EPS = 1e-9)
+- shared/parquet_batch_aggregates.py (WindowTxn, effective_window_size, row_to_window_txn)
+- shared/config.py (DATASET_MODE, WINDOW_TRANSACTIONS, WINDOW_TRANSACTIONS_MODE)
+- dataset_cpp/build_dataset.cpp
+- training/main.py
+- submission/main.py
+
+1) Как считаются агрегаты по пользователю
+
+1.1 Окно истории
+- Для каждого customer_id хранится скользящее окно последних N транзакций (deque).
+- N = effective_window_size():
+  - если DATASET_MODE == "window_50", то N = WINDOW_TRANSACTIONS_MODE,
+  - иначе N = WINDOW_TRANSACTIONS.
+- Фичи для текущей строки считаются по окну ДО update(row); после расчёта вызывается
+  agg.update(row), и строка попадает в окно для следующих событий.
+
+1.2 Что хранится в окне (WindowTxn)
+Поля берутся из строки parquet; парсинг — в row_to_window_txn / _parse_amount / _parse_dttm:
+- amount = parse(operaton_amt), конечное число или None
+- dttm = parse(event_dttm) или None
+- os_type = operating_system_type
+- dev_ver = device_system_version
+- mcc = mcc_code
+- ch_type = channel_indicator_type
+- ch_sub = channel_indicator_sub_type, иначе channel_indicator_subtype
+- tz = timezone
+- compromised, web_rdp, voip (как в сырой строке; для фич см. ниже)
+- session_id
+- browser_language
+- event_type_nm
+- event_descr = event_descr из строки, если нет — event_desc (в окне уже единое поле)
+
+1.3 Вспомогательные определения
+- Пустая строка: None, или str без непробельных символов (_empty_str).
+- _safe_div(num, den): знаменатель = den, если |den| > EPS, иначе EPS.
+- cat_to_float(s): None или пустая после strip → 0.0; иначе MD5(utf-8) → int(hex,16) % 1_000_000 → float.
+
+1.4 Агрегаты из окна при расчёте фич
+
+A) По суммам amount в окне (только конечные числа):
+- amounts = [t.amount для t в window, где amount валидна]
+- n_amt = len(amounts)
+- median, mean: statistics; если n_amt == 0 → NaN
+- std: выборочное (n-1), если n_amt >= 2, иначе NaN
+- p95: xs = sorted(amounts), idx = floor(0.95 * (len(xs) - 1)), p95 = xs[idx]; пустой список → NaN
+
+B) Временные агрегаты относительно текущего dttm (текущая строка):
+- recent = [(t.dttm, t.amount)] по window: dttm есть, amount конечна, t.dttm >= current_dttm - 24h
+- count_since(delta): если current_dttm None → 0; иначе число пар в recent с tt >= current_dttm - delta
+- sum_since(delta): аналогично, сумма amount; при отсутствии dttm → 0.0
+- max_since_24h: max(amount) по recent; пусто → NaN
+- Для фичи max_amount_last_24h: если max_since_24h = NaN → подставляется 0.0
+
+C) Счётчики встречаемости по окну (целые словари, потом float):
+- seen_devices[(os_type, dev_ver)]: +1 за транзакцию, если не _empty_str(os_type) ИЛИ не _empty_str(dev_ver)
+- seen_mcc[mcc]: +1, если mcc не None и не пустая строка
+- seen_channels[(ch_type, ch_sub)]: +1, если ch_type is not None ИЛИ ch_sub is not None
+- seen_tz[tz]: +1, если timezone не пустой
+- seen_bl[browser_language]: +1, если не пустой
+- seen_descr[event_descr]: +1, если не пустой (в окне уже поле с fallback event_desc)
+- seen_type[event_type_nm]: +1, если не пустой
+
+D) Последняя дата по ключам (для time_since_last_*):
+- last_seen_dev, last_seen_mcc, last_seen_channel: для каждого ключа — dttm последней транзакции
+  в хронологическом порядке окна, где ключ «валиден» по тем же правилам, что и в (C).
+
+E) Интервалы между подряд идущими транзакциями с dttm в окне:
+- gap_seconds: для соседних в порядке окна пара (prev_dttm, t.dttm), разница в секундах,
+  если конечна и >= 0
+
+F) Последняя сумма в окне:
+- last_amount: последнее конечное t.amount при проходе по window с начала до конца
+
+G) Последние события по времени (с конца окна):
+- last_event_dttm: последняя запись с dttm != None (обход reversed(window))
+- second_last_event_dttm: вторая по свежести с dttm != None
+
+H) Сессии:
+- session_counts[sid] = число транзакций в окне с session_id == sid
+
+I) Размер истории для фичи tr_amount:
+- tr_amount (аргумент compute_features) по умолчанию = len(window); в фиче:
+  min(tr_amount, effective_window_size())
+
+2) Полный список фич для модели (порядок = shared/features.py: FEATURE_NAMES), 53 признака
+
+У каждого пункта — имя колонки и формула как в compute_features.
+
+1. operation_amt
+   = amount из operaton_amt (конечное float; иначе NaN)
+
+2. amount_to_median
+   = amount / median, если median конечна и median != 0, иначе NaN
+
+3. amount_zscore
+   = (amount - mean) / std, если std конечна, std > 0, amount конечна, иначе NaN
+
+4. is_amount_high
+   = 1.0, если p95 и amount конечны и amount > p95, иначе 0.0
+
+5. transactions_last_1h
+   = float(count_since(1 hour))
+
+6. transactions_last_24h
+   = float(count_since(24 hours))
+
+7. sum_amount_last_1h
+   = sum_since(1 hour)
+
+8. max_amount_last_24h
+   = max_since_24h, если конечно; иначе 0.0
+
+9. device_freq
+   = device_count / tx_total, если tx_total = len(window) > 0, иначе 0.0;
+   device_count = seen_devices[(os_c, dev_c)], если для текущей строки не пустой os_c ИЛИ dev_c, иначе 0
+
+10. device_count
+    = float(device_count) как выше
+
+11. time_since_last_device
+    = секунды (current_dttm - last_seen_dev[dkey_c]), если есть dttm и ключ валиден и запись есть;
+      иначе -1.0
+
+12. mcc_freq
+    = mcc_count / tx_total при tx_total > 0, иначе 0; mcc_count из seen_mcc при непустом mcc_c
+
+13. mcc_count
+    = float, как выше
+
+14. time_since_last_mcc
+    = аналогично устройству для mcc
+
+15. channel_freq
+    = channel_count / tx_total; channel_count при ch_t is not None или ch_s is not None
+
+16. channel_count
+    = float
+
+17. time_since_last_channel
+    = секунды до последнего совпадения канала или -1.0
+
+18. timezone_freq
+    = timezone_count / tx_total; timezone_count при непустом timezone текущей строки
+
+19. browser_language_freq
+    = bl_count / tx_total; bl_count при непустом browser_language текущей строки
+
+20. is_compromised_device
+    = 1.0 только если compromised парсится в конечное float и значение == 1.0; иначе 0.0
+
+21. web_rdp_connection
+    = 1.0, если поле не «пустая строка» по _empty_str, иначе 0.0
+
+22. phone_voip_call_state
+    = то же для phone_voip_call_state
+
+23. hour
+    = float(hour), если current_dttm есть, иначе NaN
+
+24. day_of_week
+    = float(weekday), 0 = Monday … 6 = Sunday, если dttm есть, иначе NaN
+
+25. is_night_transaction
+    = 1.0, если hour_val >= 22 или hour_val < 6; hour_val при отсутствии dttm = -1 → условие < 6 даёт 1.0
+
+26. is_weekend
+    = 1.0, если dow_val >= 5; при отсутствии dttm dow_val = -1 → 0.0
+
+27. transactions_last_10m
+    = float(count_since(10 minutes))
+
+28. sum_amount_last_24h
+    = sum_since(24 hours)
+
+29. time_since_prev_transaction
+    = (current_dttm - last_event_dttm) в секундах, если обе даты есть; иначе -1.0
+
+30. transactions_in_session
+    = float(session_counts[current_session_id] + 1), если session_id есть; иначе 1.0
+
+31. timezone_missing
+    = 1.0, если timezone пустой по _empty_str, иначе 0.0
+
+32. tr_amount
+    = float(min(аргумент tr_amount в compute_features, effective_window_size()))
+
+33. event_descr
+    = cat_to_float(descr), descr = event_descr строки, если None — event_desc
+
+34. mcc_code
+    = cat_to_float(mcc_code текущей строки)
+
+35. event_descr_freq
+    = _safe_div(seen_descr[descr], tx_total), если tx_total > 0 и descr не пустой; иначе 0.0
+
+36. event_type_nm_freq
+    = _safe_div(seen_type[event_type_nm], tx_total) при tx_total > 0 и непустом event_type_nm; иначе 0.0
+
+37. log_tr_amount
+    = log1p(max(0, аргумент tr_amount в compute_features))
+
+38. transactions_last_10m_norm
+    = _safe_div(tx_10m, log_den); log_den = log_tr_amount если > EPS, иначе EPS
+
+39. transactions_last_1h_norm
+    = _safe_div(tx_1h, log_den)
+
+40. transactions_last_24h_norm
+    = _safe_div(tx_24h, log_den)
+
+41. sum_amount_last_1h_norm
+    = _safe_div(sum_1h, log_den)
+
+42. sum_amount_last_24h_norm
+    = _safe_div(sum_24h, log_den)
+
+43. transactions_last_10m_to_1h
+    = tx_10m / (tx_1h + 1.0)
+
+44. transactions_last_1h_to_24h
+    = tx_1h / (tx_24h + 1.0)
+
+45. sum_1h_to_24h
+    = sum_1h / (sum_24h + 1.0)
+
+46. time_since_2nd_prev_transaction
+    = секунды до second_last_event_dttm, если обе даты есть; иначе -1.0
+
+47. mean_time_between_tx
+    = mean(gap_seconds), если список не пуст; иначе -1.0
+
+48. std_time_between_tx
+    = stdev(gap_seconds), если элементов >= 2; если список пуст — -1.0; если один зазор — 0.0
+
+49. amount_to_last_amount
+    = _safe_div(amount, last_amount + EPS), если amount и last_amount конечны; иначе NaN
+
+50. amount_to_max_24h
+    = _safe_div(amount, max_amount_last_24h + EPS), если amount конечна; иначе NaN
+
+51. time_since_prev_to_mean_gap
+    = _safe_div(time_since_prev, mean_gap + EPS), если time_since_prev >= 0 и mean_gap >= 0; иначе -1.0
+
+52. device_freq_alt
+    = _safe_div(device_count, amount + EPS), если amount конечна; иначе _safe_div(device_count, EPS)
+
+53. mcc_freq_alt
+    = аналогично для mcc_count
+
+3) Что не входит в X при обучении
+
+В training/main.py:
+- X = только колонки из FEATURE_NAMES (все 53 имени должны быть в parquet, иначе ошибка)
+- y = target
+- sample_weight = sample_weight
+- event_dttm — только для time split train/val
+- event_id не используется как признак
+
+Не входят в признаки: event_id, event_dttm, target, sample_weight.
+
+4) target и sample_weight в train-датасете (dataset_cpp/build_dataset.cpp)
+
+- Маппинг event_id → метка из train_labels.parquet (original target).
+- target = 1, если event_id найден в метках, иначе 0.
+- sample_weight:
+  - 5.0 (kWeightLabeled1), если найден и метка == 1
+  - 2.0 (kWeightLabeled0), если найден и метка != 1
+  - 1.0 (kWeightUnlabeled), если event_id не найден
+
+Конец документа.
