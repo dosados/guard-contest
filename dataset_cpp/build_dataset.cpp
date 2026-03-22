@@ -51,10 +51,11 @@ static std::string path_basename(const std::string& p) {
   return p.substr(pos + 1);
 }
 
-/** Текстовая шкала прогресса по строкам одного parquet (stderr, одна строка с \\r). */
+/** Текстовая шкала прогресса по строкам одного parquet (stderr, одна строка: \\r + полная очистка). */
 static void render_row_progress(int64_t done, int64_t total, const std::string& file_tag) {
   constexpr int kBarW = 40;
-  std::cerr << "\r[build_dataset] [";
+  // \r — в начало строки; \033[2K — стереть всю строку (иначе короткий апдейт оставляет «хвост»).
+  std::cerr << "\r\033[2K[build_dataset] [";
   if (total > 0) {
     int filled = static_cast<int>(kBarW * done / total);
     if (filled > kBarW) filled = kBarW;
@@ -66,11 +67,11 @@ static void render_row_progress(int64_t done, int64_t total, const std::string& 
     for (int i = 0; i < kBarW; ++i) std::cerr << '.';
     std::cerr << "   " << file_tag << "  rows " << done;
   }
-  std::cerr << "\033[K" << std::flush;
+  std::cerr << std::flush;
 }
 
 static const char* kFeatureNames[] = {
-    "operation_amt",          "amount_to_median",       "amount_zscore",
+    "operaton_amt",          "amount_to_median",       "amount_zscore",
     "is_amount_high",         "transactions_last_1h",   "transactions_last_24h",
     "sum_amount_last_1h",     "max_amount_last_24h",    "device_freq",
     "device_count",           "time_since_last_device", "mcc_freq",
@@ -209,6 +210,32 @@ static std::string col_get_str(const arrow::Array& col, int64_t row) {
   }
 }
 
+/** Сумма операции: Parquet часто хранит operaton_amt как double; col_get_str для float/double возвращает пусто. */
+static std::optional<double> col_get_optional_double(const arrow::Array& col, int64_t row) {
+  if (col.IsNull(row)) return std::nullopt;
+  switch (col.type_id()) {
+    case arrow::Type::DOUBLE: {
+      double v = static_cast<const arrow::DoubleArray&>(col).Value(row);
+      return std::isfinite(v) ? std::optional<double>(v) : std::nullopt;
+    }
+    case arrow::Type::FLOAT: {
+      double v = static_cast<double>(static_cast<const arrow::FloatArray&>(col).Value(row));
+      return std::isfinite(v) ? std::optional<double>(v) : std::nullopt;
+    }
+    case arrow::Type::INT64:
+      return static_cast<double>(static_cast<const arrow::Int64Array&>(col).Value(row));
+    case arrow::Type::INT32:
+      return static_cast<double>(static_cast<const arrow::Int32Array&>(col).Value(row));
+    case arrow::Type::STRING:
+    case arrow::Type::LARGE_STRING: {
+      auto s = col_get_str(col, row);
+      return parse_double_any(s);
+    }
+    default:
+      return std::nullopt;
+  }
+}
+
 static std::optional<int64_t> col_get_int64(const arrow::Array& col, int64_t row) {
   if (col.IsNull(row)) return std::nullopt;
   if (col.type_id() == arrow::Type::INT64) {
@@ -239,8 +266,10 @@ static Txn row_to_txn(const arrow::RecordBatch& batch, int64_t i, const arrow::S
     return col_get_str(*batch.column(idx), i);
   };
   Txn t;
-  std::string amt_s = get_s("operaton_amt");
-  if (!amt_s.empty()) t.amount = parse_double_any(amt_s);
+  int amt_idx = col_index(sch, "operaton_amt");
+  if (amt_idx >= 0) {
+    if (auto p = col_get_optional_double(*batch.column(amt_idx), i)) t.amount = p;
+  }
   std::string dt = get_s("event_dttm");
   if (!dt.empty()) fill_txn_time(t, dt);
   t.os_type = get_s("operating_system_type");
@@ -315,9 +344,11 @@ static FeatureRow compute_features(const UserWindow& w, const arrow::RecordBatch
     return col_get_str(*batch.column(idx), i);
   };
 
-  std::string amt_cur_s = get_row_s("operaton_amt");
   double amount = nan_val();
-  if (auto p = parse_double_any(amt_cur_s)) amount = *p;
+  int amt_col = col_index(sch, "operaton_amt");
+  if (amt_col >= 0) {
+    if (auto p = col_get_optional_double(*batch.column(amt_col), i)) amount = *p;
+  }
 
   std::string dttm_s = get_row_s("event_dttm");
   out.event_dttm_raw = dttm_s;
@@ -818,7 +849,7 @@ int main(int argc, char** argv) {
   std::string data_train = root + "/data/train/";
   std::string labels_path = root + "/data/train_labels.parquet";
   std::string out_dir = root + "/output/";
-  std::string out_path = out_dir + "full_dataset";
+  std::string out_path = out_dir + "full_dataset.parquet";
 
   log_msg("repo_root=" + root + " out_path=" + out_path);
 

@@ -125,7 +125,7 @@ shared/features.py и UserAggregates в shared/parquet_batch_aggregates.py.
   last_event_dttm — dttm последней строки окна с успешно распарсенным event_dttm.
   N_session(sid)  — число транзакций с session_id = sid в окне (без текущей).
 
-  operation_amt
+  operaton_amt
     = amount
 
   amount_to_median
