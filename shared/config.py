@@ -6,6 +6,8 @@ import logging
 from pathlib import Path
 from typing import Sequence
 
+import numpy as np
+
 from shared.dataset_settings import DATASET_MODE, WINDOW_TRANSACTIONS, WINDOW_TRANSACTIONS_MODE
 from shared.features import FEATURE_NAMES
 
@@ -32,7 +34,9 @@ PRETEST_PATH = TEST_DATA_ROOT / "pretest.parquet"
 TEST_PATH = TEST_DATA_ROOT / "test.parquet"
 
 OUTPUT_DIR = PROJECT_ROOT / "output"
-TRAIN_DATASET_PATH = OUTPUT_DIR / "full_dataset"
+TRAIN_DATASET_PATH = OUTPUT_DIR / "full_dataset.parquet"
+# Колонки в full_dataset.parquet от C++ build_dataset, не признаки модели (см. MODEL_INPUT_FEATURES).
+TRAIN_DATASET_META_COLUMNS: tuple[str, ...] = ("customer_id",)
 
 # Побатчевое чтение parquet
 BATCH_SIZE = 65_536
@@ -45,48 +49,37 @@ WEIGHT_UNLABELED = 1.0
 WEIGHT_LABELED_0 = 2.0  # «жёлтый свет» в исходной разметке
 WEIGHT_LABELED_1 = 5.0  # «красный», целевой класс в исходной разметке
 
+
+def remap_sample_weight_from_dataset(weights: np.ndarray) -> np.ndarray:
+    """
+    Дискретные sample_weight из parquet (1 / 2 / 5) → веса для обучения (1 / 5 / 10).
+    Сопоставление по исходному массиву, чтобы 2→5 не попало под правило 5→10.
+    """
+    orig = np.asarray(weights, dtype=np.float32)
+    out = orig.copy()
+    close = np.isclose(orig, np.float32(5.0), rtol=0.0, atol=1e-5)
+    out[close] = np.float32(10.0)
+    close2 = np.isclose(orig, np.float32(2.0), rtol=0.0, atol=1e-5)
+    out[close2] = np.float32(5.0)
+    return out
+
+
 # Обучение
 MODEL_PATH = OUTPUT_DIR / "model.cbm"
 MODEL_XGB_PATH = OUTPUT_DIR / "model_xgb.json"
 MODEL_LGB_PATH = OUTPUT_DIR / "model_lgb.txt"
 MODEL_RF_PATH = OUTPUT_DIR / "model_rf.joblib"
 MODEL_LR_PATH = OUTPUT_DIR / "model_lr.joblib"
+MODEL_TORCH_PATH = OUTPUT_DIR / "weights" / "model_torch.pt"
 
-# Не подаём на вход модели (наименее полезные по permutation importance, см. output/research/feature_importance_report.txt).
-MODEL_FEATURES_EXCLUDED: tuple[str, ...] = (
-    "day_of_week",
-    "is_night_transaction",
-    "is_weekend",
-    "transactions_last_24h_norm",
-    "transactions_last_10m_to_1h",
-    "transactions_last_24h",
-    "transactions_last_1h_to_24h",
-    "transactions_last_1h_norm",
-    "sum_amount_last_24h",
-    "sum_amount_last_1h_norm",
-    "operation_amt",
-    "sum_1h_to_24h",
-    "sum_amount_last_1h",
-    "transactions_last_1h",
-    "transactions_last_10m_norm",
-)
-
-_MODEL_FEATURES_EXCLUDED_SET = frozenset(MODEL_FEATURES_EXCLUDED)
-_unknown_excluded = _MODEL_FEATURES_EXCLUDED_SET - frozenset(FEATURE_NAMES)
-if _unknown_excluded:
-    raise RuntimeError(
-        "MODEL_FEATURES_EXCLUDED содержит имена вне FEATURE_NAMES: "
-        f"{sorted(_unknown_excluded)}"
-    )
-
-# Порядок колонок на вход модели = порядок в FEATURE_NAMES, минус исключённые.
-MODEL_INPUT_FEATURES: list[str] = [f for f in FEATURE_NAMES if f not in _MODEL_FEATURES_EXCLUDED_SET]
+# Все фичи датасета в порядке FEATURE_NAMES (обучение и submission).
+MODEL_INPUT_FEATURES: list[str] = list(FEATURE_NAMES)
 
 
 def resolve_model_input_columns(parquet_schema_names: Sequence[str]) -> list[str]:
     """
-    Проверяет, что в parquet есть все колонки из FEATURE_NAMES (полный датасет),
-    и возвращает список колонок для обучения/инференса в порядке MODEL_INPUT_FEATURES.
+    Проверяет, что в parquet есть все колонки из FEATURE_NAMES,
+    и возвращает их в порядке MODEL_INPUT_FEATURES.
     """
     available = frozenset(parquet_schema_names)
     missing = [c for c in FEATURE_NAMES if c not in available]

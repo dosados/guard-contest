@@ -1,5 +1,5 @@
 """
-Скрипт объединяет output/train_dataset_part_*.parquet в один output/full_dataset.
+Скрипт объединяет output/train_dataset_part_*.parquet в один output/full_dataset.parquet.
 
 Исходные part-файлы НЕ удаляются.
 
@@ -30,7 +30,7 @@ def main() -> None:
         "--output",
         type=Path,
         default=TRAIN_DATASET_PATH,
-        help="Куда писать объединённый parquet (по умолчанию output/full_dataset).",
+        help="Куда писать объединённый parquet (по умолчанию output/full_dataset.parquet).",
     )
     parser.add_argument(
         "--batch-size",

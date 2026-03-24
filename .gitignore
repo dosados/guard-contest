@@ -15,7 +15,7 @@ catboost_info/
 dataset_cpp/build/
 
 # output/: игнорируем тяжёлые датасеты и модели; графики (.png), отчёты (.md, .txt) и CSV в research/ — в репозитории
-output/full_dataset
+output/full_dataset.parquet
 output/model_xgb.json
 output/model_lgb.txt
 output/model_pytorch.pt
@@ -32,7 +32,7 @@ __pycache__/
 *.egg-info/
 .eggs/
 /dist/
-/build/
+build/
 
 # Tooling caches
 .pytest_cache/

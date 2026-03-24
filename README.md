@@ -143,16 +143,19 @@ compromised – наличие Root-доступа на устройстве
 
 **Сборка и запуск:** CMake + C++17, зависимости Arrow/Parquet/OpenSSL (`requirements/environment_cpp.yml`); бинарник `build_dataset` из **корня** репозитория.
 
+- В начале: проверка схемы всех доступных входных parquet (`data/train_labels.parquet` обязателен; `pretrain_part_*.parquet` / `train_part_*.parquet` — если файл есть). Типы колонок должны совпадать с тем, что умеет читать C++ (в т.ч. dictionary-encoded колонки с допустимым типом значений).
 - Проход по **pretrain** → наполнение окон агрегатов по пользователям (без строк в датасете).
 - **Каждая** транзакция из **train**-файлов (с непустым `customer_id`): по текущему окну считаются фичи → строка попадает в датасет → **эта же транзакция добавляется в агрегаты** для следующих строк (обучение и обновление истории не разделяются).
-- **`target` в датасете:** `1`, если `event_id` есть в `data/train_labels.parquet`, иначе `0` (наличие строки в `train_labels` задаёт класс 1 независимо от поля `target` внутри этого файла; исходный `target` из `train_labels` по-прежнему может использоваться для `sample_weight` при обучении).
-- Результат: **`output/train_dataset_part_*.parquet`** (части). `training/main.py` читает все части; при желании объедините в `output/train_dataset.parquet`.
+- Окно: deque до **150** последних транзакций; длина контекста для фич на строку — **случайная (детерминированная от `event_id` + `customer_id`)** в диапазоне **101…150** с наибольшей вероятностью у **101** (веса `exp(-β·(W−101))`). Если в deque меньше 101 события, берётся вся доступная история.
+- **`target` в датасете:** `1`, если `event_id` есть в `data/train_labels.parquet`, иначе `0` (наличие строки в `train_labels` задаёт класс 1 независимо от поля `target` внутри этого файла; исходный `target` из `train_labels` по-прежнему используется для `sample_weight` при обучении).
+- После колонок-признаков в parquet добавляется **`customer_id`** (строка); в **`MODEL_INPUT_FEATURES`** / обучении она **не** входит (`shared/config.py` → `TRAIN_DATASET_META_COLUMNS`).
+- Результат: **`output/full_dataset.parquet`** (один файл). `shared/config.py` → `TRAIN_DATASET_PATH`; `training/main.py` также может читать legacy **`output/train_dataset_part_*.parquet`** или **`output/train_dataset.parquet`**, если они есть (см. `shared/train_dataset.py`).
 
 ### 2. Обучение и валидация модели (`training`)
 
 **Точка входа:** `python training/main.py`
 
-- Загружает все **`output/train_dataset_part_*.parquet`** или один **`output/train_dataset.parquet`**.
+- По умолчанию загружает **`output/full_dataset.parquet`**; при отсутствии — все **`output/train_dataset_part_*.parquet`** или **`output/train_dataset.parquet`** (см. `train_dataset_source_paths()`).
 - Разбивает данные на train/val (доля валидации и seed в `training/config.py`).
 - Обучает модели, учитывая веса примеров `sample_weight` (операции с исходным `target = 1` из `train_labels.parquet` сильнее влияют на обучение, чем с `target = 0` и операции без обратной связи).
 - Считает PR-AUC на валидации и сохраняет веса моделей в `output/`.
@@ -162,18 +165,21 @@ compromised – наличие Root-доступа на устройстве
 - `PYTHONPATH=. python training/random_forest.py`  
   Сохраняет модель в `output/model_rf.joblib`.
 
-Для стримингового обучения логистической регрессии есть отдельная точка входа:
-
-- `PYTHONPATH=. python training/logistic_regression.py`  
-  Сохраняет модель в `output/model_lr.joblib`.
-
 Параметры модели и разбиения — в `training/config.py` (удобно менять для экспериментов).
+
+### Анализ важности признаков (`research`)
+
+**Точка входа:** `PYTHONPATH=. python research/main.py`
+
+- Читает тот же train-датасет, что и `train_dataset_source_paths()` (`full_dataset.parquet` или части).
+- Permutation importance по PR-AUC на временной валидации; артефакты в **`output/research/`** (csv, png, md).
+- Опции: `--models`, `--max-train-rows`, `--max-val-rows`, `--dataset /path/to.parquet`.
 
 ### 3. Построение файла для сдачи (`submission`)
 
 **Точка входа:** `python submission/main.py` — только для сдачи.
 
-- Загружает выбранную обученную модель, агрегирует по **pretest**, проходит по **test**.
+- Загружает выбранную обученную модель, агрегирует по **pretest** и далее по **test** **без ограничения числа транзакций в окне** (вся доступная история клиента в pretest+test до текущей строки).
 - Для каждой тестовой операции считает фичи и предсказание.
 - Сохраняет `output/submission.csv` в формате: `event_id`, `predict` (все 633 683 строки), где `predict` — **вещественный логит** модели:
   - значения > 1 — высокая уверенность, что операция относится к целевому классу;
@@ -185,16 +191,15 @@ compromised – наличие Root-доступа на устройстве
 
 ### Общий код и конфигурация
 
-- **`shared/`** — пути к данным (`shared/config.py`), фичи (`shared/features.py`), агрегаты (`shared/parquet_batch_aggregates.py`). Чтобы добавить/изменить агрегируемые фичи, правь `FEATURE_NAMES` и логику в `shared/features.py` и при необходимости `FEATURE_COLUMNS` в `shared/parquet_batch_aggregates.py`.
+- **`shared/`** — пути к данным (`shared/config.py`), фичи (`shared/features.py`), агрегаты (`shared/parquet_batch_aggregates.py`). Имена и порядок признаков в train-parquet задаются в **`dataset_cpp/build_dataset.cpp`** (`kFeatureNames`); Python **`FEATURE_NAMES` / `compute_features`** должны совпадать для inference и скриптов. Колонки чтения из сырых parquet — `FEATURE_COLUMNS` в `shared/parquet_batch_aggregates.py`.
 - **Пути к данным:** `shared/config.py` (например `DATA_ROOT`, `TRAIN_LABELS_PATH`).
 - **Параметры модели и val:** `training/config.py`.
 
-### Режимы создания датасета (`DATASET_MODE`)
+### Окно истории: C++ vs Python
 
-В `shared/config.py` задаётся **`DATASET_MODE`**:
+Сборка **train-датасета** в C++ задаётся константами в **`dataset_cpp/build_dataset.cpp`** (`kWindowCap`, `kWindowMinSample`, `kWindowWeightBeta` и логика фич).
 
-- **`"full"`** (по умолчанию): агрегаты по полной истории; в датасет добавляется фича **`transactions_seen`** — количество транзакций по этому клиенту, которые уже попали в датасет к моменту текущей строки.
-- **`"window_50"`**: те же метрики, что и в full, но считаются **только по последним 50 транзакциям** клиента (скользящее окно). Фича `transactions_seen` не используется.
+**Инференс (`submission/main.py`):** `UserAggregates(unlimited=True)` — в deque попадают **все** операции клиента из pretest и накопленные по test до текущей строки (лимита 150 нет).
 
-Переключение: поменяй `DATASET_MODE` / размер окна в **`shared/config.py`** и синхронизируй с **`dataset_cpp/build_dataset.cpp`** (константа окна в C++), затем пересобери датасет и заново `training/main.py` и `submission/main.py`.
+**Прочие Python-пути** с `UserAggregates()` по умолчанию используют **`shared/dataset_settings.py` → `WINDOW_TRANSACTIONS`** (скользящее окно). Режим **`DATASET_MODE` / `window_50`** меняет только эти пути, не C++ и не `submission`.
 

@@ -1,13 +1,16 @@
 """
-Поиск наиболее и наименее важных фичей для моделей из training.
+Permutation importance по train-датасету для XGBoost.
 
-Поддерживаемые модели:
-- Logistic Regression (через SGDClassifier, как в training/logistic_regression.py)
-- Random Forest (как в training/random_forest.py)
-- Опционально: XGBoost и LightGBM (если установлены и включены флагом)
+Датасет: используется только `output/full_dataset.parquet`.
 
-Важность считается как permutation importance на временной валидации:
+Признаки определяются динамически из parquet: берутся все колонки кроме служебных
+(`target`, `event_dttm`, `sample_weight`, `event_id`, `customer_id`).
+Это позволяет автоматически работать с актуальным состоянием датасета.
+
+Важность: permutation importance на временной валидации:
 importance = baseline_pr_auc - pr_auc_after_shuffle(feature)
+
+Запуск из корня: PYTHONPATH=. python research/main.py
 """
 
 from __future__ import annotations
@@ -22,8 +25,6 @@ import matplotlib
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.linear_model import SGDClassifier
 from sklearn.metrics import average_precision_score
 from tqdm import tqdm
 
@@ -31,8 +32,8 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from shared.config import OUTPUT_DIR, TRAIN_DATASET_PATH, resolve_model_input_columns
-from training.config import LGBM_PARAMS, LR_PARAMS, RF_PARAMS, VAL_RATIO, XGB_PARAMS
+from shared.config import OUTPUT_DIR, TRAIN_DATASET_META_COLUMNS, TRAIN_DATASET_PATH, remap_sample_weight_from_dataset
+from training.config import VAL_RATIO, XGB_PARAMS
 
 logger = logging.getLogger(__name__)
 matplotlib.use("Agg")
@@ -97,6 +98,7 @@ def _prepare_batch(dfb: pd.DataFrame, feature_cols: list[str]) -> tuple[np.ndarr
     y = pd.to_numeric(dfb["target"], errors="coerce").fillna(0).astype(np.int32).to_numpy(copy=False)
     if "sample_weight" in dfb.columns:
         w = pd.to_numeric(dfb["sample_weight"], errors="coerce").fillna(1.0).astype(np.float32).to_numpy(copy=False)
+        w = remap_sample_weight_from_dataset(w)
     else:
         w = np.ones(shape=(len(dfb),), dtype=np.float32)
     return x, y, w
@@ -105,24 +107,45 @@ def _prepare_batch(dfb: pd.DataFrame, feature_cols: list[str]) -> tuple[np.ndarr
 def _detect_columns(path: Path) -> tuple[list[str], str]:
     pf = pq.ParquetFile(path)
     names = pf.schema_arrow.names
-    feature_cols = resolve_model_input_columns(names)
+    ignored_cols = {"target", "event_dttm", "sample_weight", "event_id", *TRAIN_DATASET_META_COLUMNS}
+    feature_cols = [name for name in names if name not in ignored_cols]
     if "event_dttm" not in names:
         raise ValueError("В датасете нет колонки event_dttm")
     if "target" not in names:
         raise ValueError("В датасете нет target")
+    if not feature_cols:
+        raise ValueError("Не найдены колонки признаков: после исключения служебных колонок список пуст.")
     return feature_cols, "event_dttm"
 
 
-def _find_time_cutoff(path: Path, val_ratio: float, batch_size: int = 2_500_000) -> pd.Timestamp:
-    pf = pq.ParquetFile(path)
+def _batch_read_columns(path: Path, feature_cols: list[str], dttm_col: str) -> list[str]:
+    """Колонки для iter_batches: фичи + target + время + sample_weight при наличии."""
+    available = frozenset(pq.ParquetFile(path).schema_arrow.names)
+    cols: list[str] = list(feature_cols) + ["target", dttm_col]
+    if "sample_weight" in available:
+        cols.append("sample_weight")
+    missing = [c for c in cols if c not in available]
+    if missing:
+        raise ValueError(f"В {path} нет колонок: {missing}")
+    return cols
+
+
+def _find_time_cutoff_paths(paths: list[Path], val_ratio: float, batch_size: int = 2_500_000) -> pd.Timestamp:
     by_day: Counter[pd.Timestamp] = Counter()
     total = 0
-    for rb in tqdm(pf.iter_batches(columns=["event_dttm"], batch_size=batch_size), desc="Скан дат", unit="batch"):
-        s = pd.to_datetime(rb.column(0).to_pandas(), errors="coerce").dt.floor("D")
-        vc = s.value_counts(dropna=True)
-        for k, v in vc.items():
-            by_day[k] += int(v)
-            total += int(v)
+    for path in paths:
+        pf = pq.ParquetFile(path)
+        tag = path.name
+        for rb in tqdm(
+            pf.iter_batches(columns=["event_dttm"], batch_size=batch_size),
+            desc=f"Скан дат ({tag})",
+            unit="batch",
+        ):
+            s = pd.to_datetime(rb.column(0).to_pandas(), errors="coerce").dt.floor("D")
+            vc = s.value_counts(dropna=True)
+            for k, v in vc.items():
+                by_day[k] += int(v)
+                total += int(v)
     if total == 0:
         raise ValueError("Не удалось прочитать event_dttm для split по времени.")
     val_target = max(1, int(total * val_ratio))
@@ -134,43 +157,12 @@ def _find_time_cutoff(path: Path, val_ratio: float, batch_size: int = 2_500_000)
         if acc >= val_target:
             break
     assert cutoff is not None
-    logger.info("Time split cutoff day: %s (val target rows ~= %d)", cutoff.date(), val_target)
+    logger.info("Time split cutoff day: %s (val target rows ~= %d, total rows %d)", cutoff.date(), val_target, total)
     return cutoff
 
 
-def _fit_logreg(
-    x_train: np.ndarray, y_train: np.ndarray, w_train: np.ndarray, feature_cols: list[str]
-) -> SGDClassifier:
-    model = SGDClassifier(
-        loss="log_loss",
-        penalty=LR_PARAMS.get("penalty", "l2"),
-        alpha=LR_PARAMS.get("alpha", 1e-4),
-        fit_intercept=LR_PARAMS.get("fit_intercept", True),
-        random_state=LR_PARAMS.get("random_state", 42),
-        max_iter=200,
-        tol=1e-3,
-        learning_rate="optimal",
-    )
-    X_train = pd.DataFrame(x_train, columns=feature_cols)
-    model.fit(X_train, y_train, sample_weight=w_train)
-    return model
-
-
-def _fit_rf(
-    x_train: np.ndarray, y_train: np.ndarray, w_train: np.ndarray, feature_cols: list[str]
-) -> RandomForestClassifier:
-    trees_total = int(RF_PARAMS.get("n_estimators_total", 400))
-    model = RandomForestClassifier(
-        n_estimators=max(50, trees_total),
-        max_depth=RF_PARAMS.get("max_depth", None),
-        max_features=RF_PARAMS.get("max_features", "sqrt"),
-        min_samples_leaf=RF_PARAMS.get("min_samples_leaf", 1),
-        n_jobs=RF_PARAMS.get("n_jobs", -1),
-        random_state=RF_PARAMS.get("random_state", 42),
-    )
-    X_train = pd.DataFrame(x_train, columns=feature_cols)
-    model.fit(X_train, y_train, sample_weight=w_train)
-    return model
+def _find_time_cutoff(path: Path, val_ratio: float, batch_size: int = 2_500_000) -> pd.Timestamp:
+    return _find_time_cutoff_paths([path], val_ratio=val_ratio, batch_size=batch_size)
 
 
 def _fit_xgb(x_train: np.ndarray, y_train: np.ndarray, w_train: np.ndarray, feature_cols: list[str]):
@@ -191,44 +183,14 @@ def _fit_xgb(x_train: np.ndarray, y_train: np.ndarray, w_train: np.ndarray, feat
     return xgb.train(params=params, dtrain=dtrain, num_boost_round=max(50, rounds))
 
 
-def _fit_lgb(x_train: np.ndarray, y_train: np.ndarray, w_train: np.ndarray, feature_cols: list[str]):
-    import lightgbm as lgb
+def _predict_proba(model, x: np.ndarray, feature_cols: list[str]) -> np.ndarray:
+    import xgboost as xgb
 
-    params = {
-        "objective": "binary",
-        "metric": "average_precision",
-        "learning_rate": LGBM_PARAMS.get("learning_rate", 0.05),
-        "num_leaves": LGBM_PARAMS.get("num_leaves", 64),
-        "max_depth": LGBM_PARAMS.get("max_depth", -1),
-        "feature_fraction": LGBM_PARAMS.get("colsample_bytree", 0.8),
-        "bagging_fraction": LGBM_PARAMS.get("subsample", 0.8),
-        "verbose": -1,
-        "seed": LGBM_PARAMS.get("random_state", 42),
-    }
-    X_train = pd.DataFrame(x_train, columns=feature_cols)
-    dtrain = lgb.Dataset(X_train, label=y_train, weight=w_train, free_raw_data=True)
-    rounds = int(LGBM_PARAMS.get("n_estimators", 800))
-    return lgb.train(params, dtrain, num_boost_round=max(50, rounds))
-
-
-def _predict_proba(model_name: str, model, x: np.ndarray, feature_cols: list[str]) -> np.ndarray:
-    if model_name == "xgboost":
-        import xgboost as xgb
-
-        d = xgb.DMatrix(x, feature_names=feature_cols)
-        return np.asarray(model.predict(d), dtype=np.float32)
-    X_df = pd.DataFrame(x, columns=feature_cols)
-    if model_name == "logistic_regression":
-        return model.predict_proba(X_df)[:, 1].astype(np.float32)
-    if model_name == "random_forest":
-        return model.predict_proba(X_df)[:, 1].astype(np.float32)
-    if model_name == "lightgbm":
-        return np.asarray(model.predict(X_df), dtype=np.float32)
-    raise ValueError(f"Неизвестная модель: {model_name}")
+    d = xgb.DMatrix(x, feature_names=feature_cols)
+    return np.asarray(model.predict(d), dtype=np.float32)
 
 
 def _compute_permutation_importance(
-    model_name: str,
     model,
     x_val: np.ndarray,
     y_val: np.ndarray,
@@ -237,18 +199,18 @@ def _compute_permutation_importance(
     random_seed: int,
 ) -> tuple[float, dict[str, float]]:
     rng = np.random.default_rng(random_seed)
-    baseline_pred = _predict_proba(model_name, model, x_val, feature_cols)
+    baseline_pred = _predict_proba(model, x_val, feature_cols)
     baseline = float(average_precision_score(y_val, baseline_pred))
-    logger.info("%s baseline PR-AUC: %.6f", model_name, baseline)
+    logger.info("xgboost baseline PR-AUC: %.6f", baseline)
 
     importances: dict[str, float] = {}
-    for j, feat in enumerate(tqdm(feature_cols, desc=f"{model_name}: permutation", unit="feature")):
+    for j, feat in enumerate(tqdm(feature_cols, desc="xgboost: permutation", unit="feature")):
         drops: list[float] = []
         original = x_val[:, j].copy()
         for _ in range(repeats):
             perm_idx = rng.permutation(x_val.shape[0])
             x_val[:, j] = original[perm_idx]
-            pred = _predict_proba(model_name, model, x_val, feature_cols)
+            pred = _predict_proba(model, x_val, feature_cols)
             score = float(average_precision_score(y_val, pred))
             drops.append(baseline - score)
         x_val[:, j] = original
@@ -259,6 +221,7 @@ def _compute_permutation_importance(
 def _sample_from_stream(
     path: Path,
     feature_cols: list[str],
+    dttm_col: str,
     cutoff_day: pd.Timestamp,
     max_train_rows: int,
     max_val_rows: int,
@@ -266,7 +229,6 @@ def _sample_from_stream(
     random_seed: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     rng = np.random.default_rng(random_seed)
-    pf = pq.ParquetFile(path)
 
     train_seen = 0
     val_seen = 0
@@ -276,13 +238,15 @@ def _sample_from_stream(
     x_val: np.ndarray | None = None
     y_val: np.ndarray | None = None
 
+    pf = pq.ParquetFile(path)
+    read_cols = _batch_read_columns(path, feature_cols, dttm_col)
     for rb in tqdm(
-        pf.iter_batches(columns=feature_cols + ["target", "sample_weight", "event_dttm"], batch_size=batch_size),
-        desc="Сэмплирование train/val",
+        pf.iter_batches(columns=read_cols, batch_size=batch_size),
+        desc=f"Сэмплирование ({path.name})",
         unit="batch",
     ):
         dfb = rb.to_pandas()
-        dttm = pd.to_datetime(dfb["event_dttm"], errors="coerce")
+        dttm = pd.to_datetime(dfb[dttm_col], errors="coerce")
         train_mask = dttm < cutoff_day
         val_mask = ~train_mask
 
@@ -371,31 +335,8 @@ def _plot_summary(summary: pd.DataFrame, out_dir: Path, top_k: int) -> tuple[Pat
     return top_path, low_path
 
 
-def _plot_per_model_heatmap(all_results: pd.DataFrame, out_dir: Path) -> Path:
-    pivot = all_results.pivot_table(
-        index="feature",
-        columns="model",
-        values="importance_drop_pr_auc",
-        aggfunc="mean",
-    ).fillna(0.0)
-    pivot = pivot.loc[pivot.mean(axis=1).sort_values(ascending=False).index]
-    heatmap_path = out_dir / "importance_heatmap.png"
-
-    plt.figure(figsize=(11, max(8, len(pivot) * 0.25)))
-    plt.imshow(pivot.values, aspect="auto")
-    plt.colorbar(label="Drop in PR-AUC")
-    plt.xticks(range(len(pivot.columns)), pivot.columns, rotation=30, ha="right")
-    plt.yticks(range(len(pivot.index)), pivot.index)
-    plt.title("Permutation importance by model")
-    plt.tight_layout()
-    plt.savefig(heatmap_path, dpi=160)
-    plt.close()
-    return heatmap_path
-
-
 def _write_markdown_report(
     out_path: Path,
-    models: list[str],
     train_rows: int,
     val_rows: int,
     repeats: int,
@@ -403,7 +344,6 @@ def _write_markdown_report(
     summary: pd.DataFrame,
     top_png: Path,
     low_png: Path,
-    heatmap_png: Path,
 ) -> None:
     top_k = min(15, len(summary))
     top_df = summary.head(top_k)
@@ -413,7 +353,7 @@ def _write_markdown_report(
     lines.append("# Feature Importance Research")
     lines.append("")
     lines.append("## Setup")
-    lines.append(f"- Models: `{', '.join(models)}`")
+    lines.append("- Model: `xgboost`")
     lines.append(f"- Train rows used: `{train_rows}`")
     lines.append(f"- Validation rows used: `{val_rows}`")
     lines.append(f"- Permutation repeats: `{repeats}`")
@@ -428,7 +368,6 @@ def _write_markdown_report(
     lines.append("## Charts")
     lines.append(f"- Most important: `{top_png.name}`")
     lines.append(f"- Least important: `{low_png.name}`")
-    lines.append(f"- Per-model heatmap: `{heatmap_png.name}`")
     lines.append("")
     lines.append("## Top most important features")
     for i, row in top_df.iterrows():
@@ -454,11 +393,6 @@ def main() -> None:
     )
 
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--models",
-        default="logistic_regression,random_forest",
-        help="Список моделей через запятую: logistic_regression,random_forest,xgboost,lightgbm",
-    )
     parser.add_argument("--max-train-rows", type=int, default=2_000_000, help="Макс. число строк train для сэмпла")
     parser.add_argument("--max-val-rows", type=int, default=600_000, help="Макс. число строк val для сэмпла")
     parser.add_argument("--batch-size", type=int, default=250_000, help="Размер parquet batch (меньше => безопаснее по RAM)")
@@ -478,18 +412,15 @@ def main() -> None:
             f"Не найден {TRAIN_DATASET_PATH}. "
             "Сначала соберите датасет: ./dataset_cpp/build/build_dataset ."
         )
+    logger.info("Файл датасета: %s", TRAIN_DATASET_PATH)
 
-    models = [m.strip().lower() for m in args.models.split(",") if m.strip()]
-    supported = {"logistic_regression", "random_forest", "xgboost", "lightgbm"}
-    unknown = [m for m in models if m not in supported]
-    if unknown:
-        raise ValueError(f"Неизвестные модели: {unknown}. Допустимые: {sorted(supported)}")
     if args.max_memory_gb <= 1.0:
         raise ValueError("--max-memory-gb должен быть > 1")
     if not (0.2 <= args.memory_safety_factor <= 0.9):
         raise ValueError("--memory-safety-factor должен быть в диапазоне [0.2, 0.9]")
 
-    feature_cols, _ = _detect_columns(TRAIN_DATASET_PATH)
+    feature_cols, dttm_col = _detect_columns(TRAIN_DATASET_PATH)
+    logger.info("Признаков для анализа: %d (%s …)", len(feature_cols), feature_cols[0])
     safe_train_rows, safe_val_rows = _apply_memory_budget(
         requested_train_rows=args.max_train_rows,
         requested_val_rows=args.max_val_rows,
@@ -501,6 +432,7 @@ def main() -> None:
     x_train, y_train, w_train, x_val, y_val = _sample_from_stream(
         TRAIN_DATASET_PATH,
         feature_cols=feature_cols,
+        dttm_col=dttm_col,
         cutoff_day=cutoff_day,
         max_train_rows=safe_train_rows,
         max_val_rows=safe_val_rows,
@@ -508,36 +440,17 @@ def main() -> None:
         random_seed=args.seed,
     )
 
-    result_frames: list[pd.DataFrame] = []
-    for model_name in models:
-        logger.info("=== Обучение и importance: %s ===", model_name)
-        try:
-            if model_name == "logistic_regression":
-                model = _fit_logreg(x_train, y_train, w_train, feature_cols)
-            elif model_name == "random_forest":
-                model = _fit_rf(x_train, y_train, w_train, feature_cols)
-            elif model_name == "xgboost":
-                model = _fit_xgb(x_train, y_train, w_train, feature_cols)
-            elif model_name == "lightgbm":
-                model = _fit_lgb(x_train, y_train, w_train, feature_cols)
-            else:
-                continue
-
-            baseline, importances = _compute_permutation_importance(
-                model_name=model_name,
-                model=model,
-                x_val=x_val.copy(),
-                y_val=y_val,
-                feature_cols=feature_cols,
-                repeats=args.repeats,
-                random_seed=args.seed,
-            )
-            result_frames.append(_importances_to_df(model_name, baseline, importances))
-        except Exception as exc:
-            logger.exception("Модель %s пропущена из-за ошибки: %s", model_name, exc)
-
-    if not result_frames:
-        raise RuntimeError("Нет результатов importance: не удалось обучить ни одну модель.")
+    logger.info("=== Обучение и importance: xgboost ===")
+    model = _fit_xgb(x_train, y_train, w_train, feature_cols)
+    baseline, importances = _compute_permutation_importance(
+        model=model,
+        x_val=x_val.copy(),
+        y_val=y_val,
+        feature_cols=feature_cols,
+        repeats=args.repeats,
+        random_seed=args.seed,
+    )
+    result_frames = [_importances_to_df("xgboost", baseline, importances)]
 
     all_results = pd.concat(result_frames, ignore_index=True)
     summary = (
@@ -563,7 +476,7 @@ def main() -> None:
 
     lines = []
     lines.append("Feature importance report (permutation importance on time-based validation)")
-    lines.append(f"Models: {', '.join(models)}")
+    lines.append("Model: xgboost")
     lines.append(f"Rows used: train={len(x_train)}, val={len(x_val)}")
     lines.append(f"Permutation repeats: {args.repeats}")
     lines.append("")
@@ -577,10 +490,8 @@ def main() -> None:
 
     txt_path.write_text("\n".join(lines), encoding="utf-8")
     top_png, low_png = _plot_summary(summary, out_dir=out_dir, top_k=top_k)
-    heatmap_png = _plot_per_model_heatmap(all_results, out_dir=out_dir)
     _write_markdown_report(
         out_path=md_path,
-        models=models,
         train_rows=len(x_train),
         val_rows=len(x_val),
         repeats=args.repeats,
@@ -588,7 +499,6 @@ def main() -> None:
         summary=summary,
         top_png=top_png,
         low_png=low_png,
-        heatmap_png=heatmap_png,
     )
 
     logger.info("Сохранено: %s", per_model_path)
@@ -597,7 +507,6 @@ def main() -> None:
     logger.info("Сохранено: %s", md_path)
     logger.info("Сохранено: %s", top_png)
     logger.info("Сохранено: %s", low_png)
-    logger.info("Сохранено: %s", heatmap_png)
     logger.info("Самая важная фича: %s", top_df.iloc[0]["feature"])
     logger.info("Самая неважная фича: %s", low_df.iloc[0]["feature"])
 

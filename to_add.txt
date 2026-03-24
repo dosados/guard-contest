@@ -1,36 +1,50 @@
-freq(device) / total_tx
-count(device)
-days_since_last_seen(device)
-
-вместо is_new;
+amount_diff_prev = amount_cur - last_amount
+amount_ratio_prev = amount_cur / last_amount
 
 
-event_descr_freq;
-event_type_nm_freq;
+trend = mean_last_3 / mean_last_10
+
+Позиция текущей суммы в истории
+percentile_rank(amount_cur, amounts)
+
+Регулярность поведения
+std(time_deltas between transactions)
+
+Смена timezone
+is_timezone_change = (tz_cur != last_tz)
+
+Новизна комбинации device + timezone
+is_new_device_tz_pair
+
+Переключение устройства
+is_device_switch = (dkey != last_dkey)
 
 
-вместо нынешнего is_compromised должно быть так - 0, если compromised = nan или 0, и 1 если там 1;
+is_mcc_switch = (mcc_cur != last_mcc)
 
-log(1 + tr_amount)
-+ нормировать другие фичи на него
+session_duration = last_time_in_session - first_time_in_session
 
-transactions_last_10m / transactions_last_1h
-transactions_last_1h / transactions_last_24h
-sum_1h / sum_24h
+session_mean_amount
 
-time_since_prev_transaction
-time_since_2nd_prev
-mean_time_between_tx
-std_time_between_tx
+amount_zscore * is_new_device
+amount_zscore * is_new_mcc
+is_new_device * is_new_timezone
 
+device_freq
 
-time_since_last_device
-time_since_last_mcc
-time_since_last_channel
+Несколько последних интервалов
+delta_1 = t_cur - t_last
+delta_2 = t_last - t_prev2
+delta_3 = t_prev2 - t_prev3
 
-amount / last_amount
-amount / max_amount_last_24h
-transactions_last_1h / (transactions_last_24h + 1)
-time_since_prev / mean_time_between_tx
-device_count / tr_amount
-mcc_count / tr_amount
+Относительное ускорение
+acceleration = delta_1 / delta_2
+
+Стандартное отклонение интервалов
+std_delta_last_k
+
+Коэффициент вариации
+cv = std(delta) / mean(delta)
+
+time_since_last_device_change
+time_since_last_mcc_change

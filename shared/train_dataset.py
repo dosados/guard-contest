@@ -1,4 +1,4 @@
-"""Загрузка обучающего датасета: output/full_dataset (C++) или legacy-форматы."""
+"""Загрузка обучающего датасета: output/full_dataset.parquet (C++) или legacy-форматы."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 import pandas as pd
 from tqdm import tqdm
 
-from shared.config import OUTPUT_DIR, TRAIN_DATASET_PATH
+from shared.config import OUTPUT_DIR, TRAIN_DATASET_PATH, remap_sample_weight_from_dataset
 
 logger = logging.getLogger(__name__)
 
@@ -43,5 +43,7 @@ def load_train_dataframe() -> pd.DataFrame:
     else:
         parts = [pd.read_parquet(p) for p in tqdm(paths, desc="train_dataset parquet", unit="file")]
         df = pd.concat(parts, ignore_index=True)
+    if "sample_weight" in df.columns:
+        df["sample_weight"] = remap_sample_weight_from_dataset(df["sample_weight"].to_numpy(copy=False))
     logger.info("Train dataframe: %d строк, %d колонок", len(df), len(df.columns))
     return df

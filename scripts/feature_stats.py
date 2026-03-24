@@ -62,8 +62,13 @@ def main() -> None:
     if not pretest_paths:
         logger.warning("Pretest not found, test features will use empty aggregates.")
     aggregates = defaultdict(
-        UserAggregates,
-        build_user_aggregates(pretest_paths, batch_size=BATCH_SIZE, show_progress=True)
+        lambda: UserAggregates(unlimited=True),
+        build_user_aggregates(
+            pretest_paths,
+            batch_size=BATCH_SIZE,
+            show_progress=True,
+            unlimited_window=True,
+        )
         if pretest_paths
         else {},
     )

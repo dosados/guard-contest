@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import argparse
 import logging
 import sys
 from collections import Counter
@@ -20,8 +21,14 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from shared.config import MODEL_LGB_PATH, MODEL_XGB_PATH, TRAIN_DATASET_PATH, resolve_model_input_columns
-from training.config import CATBOOST_PARAMS, LGBM_PARAMS, VAL_RATIO, XGB_PARAMS
+from shared.config import (
+    MODEL_LGB_PATH,
+    MODEL_XGB_PATH,
+    TRAIN_DATASET_PATH,
+    remap_sample_weight_from_dataset,
+    resolve_model_input_columns,
+)
+from training.config import CATBOOST_PARAMS, LGBM_PARAMS, VAL_RATIO, XGB_MODEL_HYPERPARAMS, XGB_PARAMS
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +37,7 @@ def _prepare_batch(dfb: pd.DataFrame, feature_cols: list[str]) -> tuple[np.ndarr
     x = dfb[feature_cols].apply(pd.to_numeric, errors="coerce").astype(np.float32).to_numpy(copy=False)
     y = pd.to_numeric(dfb["target"], errors="coerce").fillna(0).astype(np.int32).to_numpy(copy=False)
     w = pd.to_numeric(dfb["sample_weight"], errors="coerce").fillna(1.0).astype(np.float32).to_numpy(copy=False)
+    w = remap_sample_weight_from_dataset(w)
     return x, y, w
 
 
@@ -70,12 +78,48 @@ def _find_time_cutoff(path: Path, val_ratio: float, batch_size: int = 2_500_000)
     return cutoff
 
 
+def _build_xgb_train_params(config_mode: str) -> dict[str, float | int | str]:
+    defaults = {
+        "learning_rate": float(XGB_PARAMS.get("learning_rate", 0.05)),
+        "max_depth": int(XGB_PARAMS.get("max_depth", 8)),
+        "subsample": float(XGB_PARAMS.get("subsample", 0.8)),
+        "colsample_bytree": float(XGB_PARAMS.get("colsample_bytree", 0.8)),
+    }
+    selected = XGB_MODEL_HYPERPARAMS if config_mode == "best" else defaults
+
+    params = {
+        "objective": "binary:logistic",
+        "eval_metric": "aucpr",
+        "eta": float(selected["learning_rate"]),
+        "max_depth": int(selected["max_depth"]),
+        "subsample": float(selected["subsample"]),
+        "colsample_bytree": float(selected["colsample_bytree"]),
+        "min_child_weight": float(XGB_PARAMS.get("min_child_weight", 1.0)),
+        "gamma": float(XGB_PARAMS.get("gamma", 0.0)),
+        "alpha": float(XGB_PARAMS.get("reg_alpha", 0.0)),
+        "lambda": float(XGB_PARAMS.get("reg_lambda", 1.0)),
+        "tree_method": str(XGB_PARAMS.get("tree_method", "hist")),
+        "seed": int(XGB_PARAMS.get("random_state", 42)),
+    }
+    return params
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--xgb-config",
+        choices=("best", "default"),
+        default="best",
+        help="best (по умолчанию): гиперпараметры из training/grid_search/xgb_best_params.json; "
+        "default: базовые XGB_PARAMS из training/config.py",
+    )
+    args = parser.parse_args()
+
     if not TRAIN_DATASET_PATH.exists():
         raise FileNotFoundError(
             f"Не найден {TRAIN_DATASET_PATH}. "
@@ -93,16 +137,9 @@ def main() -> None:
     try:
         import xgboost as xgb
 
-        params = {
-            "objective": "binary:logistic",
-            "eval_metric": "aucpr",
-            "eta": XGB_PARAMS.get("learning_rate", 0.05),
-            "max_depth": XGB_PARAMS.get("max_depth", 8),
-            "subsample": XGB_PARAMS.get("subsample", 0.8),
-            "colsample_bytree": XGB_PARAMS.get("colsample_bytree", 0.8),
-            "tree_method": XGB_PARAMS.get("tree_method", "hist"),
-            "seed": XGB_PARAMS.get("random_state", 42),
-        }
+        params = _build_xgb_train_params(args.xgb_config)
+        logger.info("XGBoost config mode: %s", args.xgb_config)
+        logger.info("XGBoost train params: %s", params)
         booster = None
         rounds_per_batch = 1
         y_val_all: list[np.ndarray] = []

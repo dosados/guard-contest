@@ -1,0 +1,13 @@
+{
+  "hyperparameters": {
+    "learning_rate": 0.05,
+    "max_depth": 6,
+    "subsample": 0.9,
+    "colsample_bytree": 0.8,
+    "min_child_weight": 7,
+    "gamma": 5.0,
+    "reg_alpha": 0.1,
+    "reg_lambda": 5.0
+  },
+  "pr_auc_val": 0.009820305736879231
+}

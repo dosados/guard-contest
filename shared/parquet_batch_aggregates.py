@@ -131,17 +131,28 @@ class UserAggregates:
 
     __slots__ = ("_window", "_max_len")
 
-    def __init__(self, max_len: int | None = None) -> None:
-        self._max_len = max_len if max_len is not None else effective_window_size()
+    def __init__(self, max_len: int | None = None, *, unlimited: bool = False) -> None:
+        if unlimited:
+            self._max_len: int | None = None
+        elif max_len is not None:
+            self._max_len = max_len
+        else:
+            self._max_len = effective_window_size()
         self._window: deque[WindowTxn] = deque()
+
+    @property
+    def window_transaction_cap(self) -> int | None:
+        """Максимум транзакций в deque; None — без ограничения (весь pretest+история до текущей строки)."""
+        return self._max_len
 
     def __len__(self) -> int:
         return len(self._window)
 
     def update(self, row: Mapping[str, Any]) -> None:
         self._window.append(row_to_window_txn(row))
-        while len(self._window) > self._max_len:
-            self._window.popleft()
+        if self._max_len is not None:
+            while len(self._window) > self._max_len:
+                self._window.popleft()
 
     def transactions_before_current_count(self) -> int:
         return len(self._window)
@@ -207,10 +218,17 @@ def build_windowed_aggregates(
     paths: list[Any],
     batch_size: int = 65_536,
     show_progress: bool = False,
+    *,
+    unlimited_window: bool = False,
 ) -> dict[Any, UserAggregates]:
     """Проходит файлы по порядку, наполняет оконные агрегаты (только update, без фич)."""
     aggregates: dict[Any, UserAggregates] = {}
-    logger.info("Оконные агрегаты: файлов=%d, batch_size=%d", len(paths), batch_size)
+    logger.info(
+        "Оконные агрегаты: файлов=%d, batch_size=%d, unlimited_window=%s",
+        len(paths),
+        batch_size,
+        unlimited_window,
+    )
     rows_iter = iter_parquet_rows(
         paths,
         batch_size=batch_size,
@@ -224,7 +242,7 @@ def build_windowed_aggregates(
         if isinstance(cid, str) and not cid.strip():
             continue
         if cid not in aggregates:
-            aggregates[cid] = UserAggregates()
+            aggregates[cid] = UserAggregates(unlimited=unlimited_window)
         aggregates[cid].update(row)
     logger.info("Оконные агрегаты: уникальных customer_id=%d", len(aggregates))
     return aggregates
@@ -234,9 +252,16 @@ def build_user_aggregates(
     paths: list[Any],
     batch_size: int = 65_536,
     show_progress: bool = False,
+    *,
+    unlimited_window: bool = False,
 ) -> dict[Any, UserAggregates]:
     """Алиас для скриптов: то же, что build_windowed_aggregates."""
-    return build_windowed_aggregates(paths, batch_size=batch_size, show_progress=show_progress)
+    return build_windowed_aggregates(
+        paths,
+        batch_size=batch_size,
+        show_progress=show_progress,
+        unlimited_window=unlimited_window,
+    )
 
 
 def defaultdict_aggregates() -> MutableMapping[Any, UserAggregates]:

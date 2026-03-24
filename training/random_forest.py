@@ -25,7 +25,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from shared.config import MODEL_RF_PATH, TRAIN_DATASET_PATH, resolve_model_input_columns
+from shared.config import MODEL_RF_PATH, TRAIN_DATASET_PATH, remap_sample_weight_from_dataset, resolve_model_input_columns
 from training.config import RF_PARAMS, VAL_RATIO
 
 logger = logging.getLogger(__name__)
@@ -36,6 +36,7 @@ def _prepare_batch(dfb: pd.DataFrame, feature_cols: list[str]) -> tuple[np.ndarr
     y = pd.to_numeric(dfb["target"], errors="coerce").fillna(0).astype(np.int32).to_numpy(copy=False)
     if "sample_weight" in dfb.columns:
         w = pd.to_numeric(dfb["sample_weight"], errors="coerce").fillna(1.0).astype(np.float32).to_numpy(copy=False)
+        w = remap_sample_weight_from_dataset(w)
     else:
         w = np.ones(shape=(len(dfb),), dtype=np.float32)
     return x, y, w

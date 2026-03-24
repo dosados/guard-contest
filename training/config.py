@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 
-# Список признаков на вход модели и исключения: shared.config.MODEL_INPUT_FEATURES, MODEL_FEATURES_EXCLUDED.
+# Список признаков на вход модели: shared.config.MODEL_INPUT_FEATURES (все FEATURE_NAMES).
 
 logger = logging.getLogger(__name__)
 
 # Доля валидации по времени (последние VAL_RATIO строк после сортировки по event_dttm)
 VAL_RATIO = 0.15
 RANDOM_SEED = 42
+
+GRID_SEARCH_DIR = Path(__file__).resolve().parent / "grid_search"
+XGB_BEST_PARAMS_PATH = GRID_SEARCH_DIR / "xgb_best_params.json"
 
 CATBOOST_PARAMS = {
     "iterations": 800,
@@ -32,6 +37,32 @@ XGB_PARAMS = {
     "tree_method": "hist",
     "eval_metric": "aucpr",
 }
+
+
+def _load_xgb_hyperparams_from_grid_search() -> dict[str, float | int]:
+    defaults: dict[str, float | int] = {
+        "learning_rate": float(XGB_PARAMS["learning_rate"]),
+        "max_depth": int(XGB_PARAMS["max_depth"]),
+        "subsample": float(XGB_PARAMS["subsample"]),
+        "colsample_bytree": float(XGB_PARAMS["colsample_bytree"]),
+    }
+    if not XGB_BEST_PARAMS_PATH.exists():
+        return defaults
+    try:
+        payload = json.loads(XGB_BEST_PARAMS_PATH.read_text(encoding="utf-8"))
+        hp = payload.get("hyperparameters", {})
+        return {
+            "learning_rate": float(hp.get("learning_rate", defaults["learning_rate"])),
+            "max_depth": int(hp.get("max_depth", defaults["max_depth"])),
+            "subsample": float(hp.get("subsample", defaults["subsample"])),
+            "colsample_bytree": float(hp.get("colsample_bytree", defaults["colsample_bytree"])),
+        }
+    except Exception as exc:
+        logger.warning("Не удалось прочитать %s: %s", XGB_BEST_PARAMS_PATH, exc)
+        return defaults
+
+
+XGB_MODEL_HYPERPARAMS = _load_xgb_hyperparams_from_grid_search()
 
 LGBM_PARAMS = {
     "n_estimators": 800,

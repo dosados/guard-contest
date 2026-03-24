@@ -1,5 +1,7 @@
 // Сборка обучающего датасета: Arrow + Parquet + OpenSSL (MD5).
 // Train: каждая строка с непустым customer_id → строка в датасет → update окна.
+// История: deque не длиннее kWindowCap; фичи — по суффиксу длины min(stored, W), где W ~ дискретное
+// на {kWindowMinSample..kWindowCap}: P(W=101) максимальна, с ростом W вероятность убывает (веса exp(-β·(W-101))).
 // target = 1 если event_id в train_labels.parquet, иначе 0.
 // Запуск из корня репозитория: ./build_dataset [repo_root]
 
@@ -20,6 +22,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <ctime>
@@ -36,7 +39,12 @@
 #include <unordered_set>
 #include <vector>
 
-constexpr int kWindowMax = 150;
+/** Максимум транзакций в deque и верхняя граница сэмпла эффективного окна. */
+constexpr int kWindowCap = 150;
+/** Нижняя граница сэмпла: итоговое окно не меньше этого, если в deque уже столько есть (иначе — весь stored). */
+constexpr int kWindowMinSample = 101;
+/** Шаг дискретного распределения: вес размера (101+k) ∝ exp(-kWindowWeightBeta * k). */
+constexpr double kWindowWeightBeta = 0.12;
 constexpr int kOutBatch = 131072;
 constexpr double kWeightUnlabeled = 1.0;
 constexpr double kWeightLabeled0 = 2.0;
@@ -71,25 +79,59 @@ static void render_row_progress(int64_t done, int64_t total, const std::string& 
 }
 
 static const char* kFeatureNames[] = {
-    "operaton_amt",          "amount_to_median",       "amount_zscore",
-    "is_amount_high",         "transactions_last_1h",   "transactions_last_24h",
-    "sum_amount_last_1h",     "max_amount_last_24h",    "device_freq",
-    "device_count",           "time_since_last_device", "mcc_freq",
-    "mcc_count",              "time_since_last_mcc",    "channel_freq",
-    "channel_count",          "time_since_last_channel","timezone_freq",
-    "browser_language_freq",
-    "is_compromised_device",  "web_rdp_connection",     "phone_voip_call_state",
-    "hour",                   "day_of_week",            "is_night_transaction",
-    "is_weekend",             "transactions_last_10m",  "sum_amount_last_24h",
-    "time_since_prev_transaction", "transactions_in_session",
-    "timezone_missing",       "tr_amount",              "event_descr",
-    "mcc_code",               "event_descr_freq",       "event_type_nm_freq",
-    "log_tr_amount",          "transactions_last_10m_norm", "transactions_last_1h_norm",
-    "transactions_last_24h_norm", "sum_amount_last_1h_norm", "sum_amount_last_24h_norm",
-    "transactions_last_10m_to_1h", "transactions_last_1h_to_24h", "sum_1h_to_24h",
-    "time_since_2nd_prev_transaction", "mean_time_between_tx", "std_time_between_tx",
-    "amount_to_last_amount",  "amount_to_max_24h",      "time_since_prev_to_mean_gap",
-    "device_freq_alt",        "mcc_freq_alt"};
+    "operation_amt",
+    "log_1_plus_transactions_seen",
+    "amount_to_median",
+    "amount_zscore",
+    "is_amount_high",
+    "transactions_last_1h",
+    "transactions_last_24h",
+    "sum_amount_last_1h",
+    "max_amount_last_24h",
+    "is_new_device",
+    "is_new_mcc",
+    "is_new_channel",
+    "is_new_timezone",
+    "is_compromised_device",
+    "web_rdp_connection",
+    "phone_voip_call_state",
+    "hour",
+    "day_of_week",
+    "is_night_transaction",
+    "is_weekend",
+    "transactions_last_10m",
+    "sum_amount_last_24h",
+    "time_since_prev_transaction",
+    "is_new_browser_language",
+    "transactions_in_session",
+    "timezone_missing",
+    "tr_amount",
+    "event_descr",
+    "mcc_code",
+    "amount_diff_prev",
+    "amount_ratio_prev",
+    "trend_mean_last_3_to_10",
+    "amount_percentile_rank",
+    "std_time_deltas",
+    "is_timezone_change",
+    "is_new_device_tz_pair",
+    "is_device_switch",
+    "is_mcc_switch",
+    "session_duration",
+    "session_mean_amount",
+    "amount_zscore_x_is_new_device",
+    "amount_zscore_x_is_new_mcc",
+    "is_new_device_x_is_new_timezone",
+    "device_freq",
+    "delta_1",
+    "delta_2",
+    "delta_3",
+    "acceleration_delta_1_over_2",
+    "std_delta_last_k",
+    "cv_delta_last_k",
+    "time_since_last_device_change",
+    "time_since_last_mcc_change",
+};
 constexpr int kNumFeatures = sizeof(kFeatureNames) / sizeof(kFeatureNames[0]);
 
 struct Txn {
@@ -116,10 +158,52 @@ struct UserWindow {
   std::deque<Txn> dq;
   void push(const Txn& t) {
     dq.push_back(t);
-    while (static_cast<int>(dq.size()) > kWindowMax) dq.pop_front();
+    while (static_cast<int>(dq.size()) > kWindowCap) dq.pop_front();
   }
   int count() const { return static_cast<int>(dq.size()); }
 };
+
+static uint64_t mix64(uint64_t z) {
+  z += 0x9e3779b97f4a7c15ULL;
+  z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+  z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+  return z ^ (z >> 31);
+}
+
+static uint64_t hash_event_customer(int64_t event_id, const std::string& customer_id) {
+  uint64_t h = mix64(static_cast<uint64_t>(event_id));
+  for (unsigned char c : customer_id) h = mix64(h ^ (static_cast<uint64_t>(c) + 0x100000001b3ULL));
+  return h;
+}
+
+/** Целевой размер эффективного окна (до min со stored): всегда в [kWindowMinSample, kWindowCap]. */
+static int sample_effective_window_target(int64_t event_id, const std::string& customer_id) {
+  constexpr int span = kWindowCap - kWindowMinSample + 1;
+  static std::array<double, static_cast<size_t>(span)> w{};
+  static double weight_sum = 0.0;
+  static bool weights_ready = false;
+  if (!weights_ready) {
+    double s = 0.0;
+    for (int k = 0; k < span; ++k) {
+      w[static_cast<size_t>(k)] = std::exp(-kWindowWeightBeta * static_cast<double>(k));
+      s += w[static_cast<size_t>(k)];
+    }
+    weight_sum = s;
+    weights_ready = true;
+  }
+  uint64_t h = hash_event_customer(event_id, customer_id);
+  uint64_t h2 = mix64(h ^ 0xD6E8FEB866B13AD5ULL);
+  constexpr uint64_t kDenom = (1ULL << 53) - 1ULL;
+  double u = static_cast<double>(h2 & kDenom) / static_cast<double>(kDenom);
+  if (u <= 0.0) u = 1e-15;
+  double r = u * weight_sum;
+  double acc = 0.0;
+  for (int k = 0; k < span; ++k) {
+    acc += w[static_cast<size_t>(k)];
+    if (r <= acc) return kWindowMinSample + k;
+  }
+  return kWindowCap;
+}
 
 static std::string trim_copy(std::string s) {
   while (!s.empty() && (s.front() == ' ' || s.front() == '\t')) s.erase(s.begin());
@@ -186,8 +270,18 @@ static void fill_txn_time(Txn& t, const std::string& dttm_s) {
 
 static bool empty_field(const std::string& s) { return trim_copy(s).empty(); }
 
+/** Parquet часто отдаёт dictionary-encoded колонки: схема проверяет тип значений, а в батче id() == DICTIONARY. */
 static std::string col_get_str(const arrow::Array& col, int64_t row) {
   if (col.IsNull(row)) return {};
+  if (col.type_id() == arrow::Type::DICTIONARY) {
+    const auto& da = static_cast<const arrow::DictionaryArray&>(col);
+    if (da.IsNull(row)) return {};
+    int64_t di = da.GetValueIndex(row);
+    if (di < 0) return {};
+    const auto& dict = *da.dictionary();
+    if (di >= dict.length()) return {};
+    return col_get_str(dict, di);
+  }
   switch (col.type_id()) {
     case arrow::Type::STRING: {
       auto& a = static_cast<const arrow::StringArray&>(col);
@@ -213,6 +307,15 @@ static std::string col_get_str(const arrow::Array& col, int64_t row) {
 /** Сумма операции: Parquet часто хранит operaton_amt как double; col_get_str для float/double возвращает пусто. */
 static std::optional<double> col_get_optional_double(const arrow::Array& col, int64_t row) {
   if (col.IsNull(row)) return std::nullopt;
+  if (col.type_id() == arrow::Type::DICTIONARY) {
+    const auto& da = static_cast<const arrow::DictionaryArray&>(col);
+    if (da.IsNull(row)) return std::nullopt;
+    int64_t di = da.GetValueIndex(row);
+    if (di < 0) return std::nullopt;
+    const auto& dict = *da.dictionary();
+    if (di >= dict.length()) return std::nullopt;
+    return col_get_optional_double(dict, di);
+  }
   switch (col.type_id()) {
     case arrow::Type::DOUBLE: {
       double v = static_cast<const arrow::DoubleArray&>(col).Value(row);
@@ -238,11 +341,33 @@ static std::optional<double> col_get_optional_double(const arrow::Array& col, in
 
 static std::optional<int64_t> col_get_int64(const arrow::Array& col, int64_t row) {
   if (col.IsNull(row)) return std::nullopt;
-  if (col.type_id() == arrow::Type::INT64) {
-    return static_cast<const arrow::Int64Array&>(col).Value(row);
+  if (col.type_id() == arrow::Type::DICTIONARY) {
+    const auto& da = static_cast<const arrow::DictionaryArray&>(col);
+    if (da.IsNull(row)) return std::nullopt;
+    int64_t di = da.GetValueIndex(row);
+    if (di < 0) return std::nullopt;
+    const auto& dict = *da.dictionary();
+    if (di >= dict.length()) return std::nullopt;
+    return col_get_int64(dict, di);
   }
-  if (col.type_id() == arrow::Type::INT32) {
-    return static_cast<int64_t>(static_cast<const arrow::Int32Array&>(col).Value(row));
+  switch (col.type_id()) {
+    case arrow::Type::INT64:
+      return static_cast<const arrow::Int64Array&>(col).Value(row);
+    case arrow::Type::INT32:
+      return static_cast<int64_t>(static_cast<const arrow::Int32Array&>(col).Value(row));
+    case arrow::Type::INT16:
+      return static_cast<int64_t>(static_cast<const arrow::Int16Array&>(col).Value(row));
+    case arrow::Type::INT8:
+      return static_cast<int64_t>(static_cast<const arrow::Int8Array&>(col).Value(row));
+    case arrow::Type::UINT32:
+      return static_cast<int64_t>(static_cast<const arrow::UInt32Array&>(col).Value(row));
+    case arrow::Type::UINT64: {
+      uint64_t v = static_cast<const arrow::UInt64Array&>(col).Value(row);
+      if (v > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) return std::nullopt;
+      return static_cast<int64_t>(v);
+    }
+    default:
+      break;
   }
   auto s = col_get_str(col, row);
   if (s.empty()) return std::nullopt;
@@ -257,6 +382,136 @@ static int col_index(const arrow::Schema& sch, const std::string& name) {
   auto f = sch.GetFieldByName(name);
   if (!f) return -1;
   return sch.GetFieldIndex(name);
+}
+
+static bool path_is_readable_file(const std::string& p) {
+  std::ifstream f(p);
+  return f.good();
+}
+
+/** Базовый Arrow-тип: для dictionary — тип значений. */
+static arrow::Type::type base_arrow_type_id(const std::shared_ptr<arrow::DataType>& dt) {
+  if (dt->id() == arrow::Type::DICTIONARY) {
+    return static_cast<const arrow::DictionaryType&>(*dt).value_type()->id();
+  }
+  return dt->id();
+}
+
+enum class ColTypeExpect {
+  /** int32/int64 или строка с числом (event_id, target в labels). */
+  kIntKey,
+  /** operaton_amt: число или строка с числом. */
+  kAmount,
+  /** Текст и пр.: utf8 / large_utf8 / int как в col_get_str. */
+  kText,
+};
+
+static bool type_matches_expectation(arrow::Type::type tid, ColTypeExpect ex) {
+  switch (ex) {
+    case ColTypeExpect::kIntKey:
+      return tid == arrow::Type::INT64 || tid == arrow::Type::INT32 || tid == arrow::Type::INT8 ||
+             tid == arrow::Type::INT16 || tid == arrow::Type::UINT32 || tid == arrow::Type::UINT64 ||
+             tid == arrow::Type::STRING || tid == arrow::Type::LARGE_STRING;
+    case ColTypeExpect::kAmount:
+      return tid == arrow::Type::DOUBLE || tid == arrow::Type::FLOAT || tid == arrow::Type::INT64 ||
+             tid == arrow::Type::INT32 || tid == arrow::Type::STRING || tid == arrow::Type::LARGE_STRING;
+    case ColTypeExpect::kText:
+      return tid == arrow::Type::STRING || tid == arrow::Type::LARGE_STRING || tid == arrow::Type::INT64 ||
+             tid == arrow::Type::INT32;
+    default:
+      return false;
+  }
+}
+
+struct SchemaColumnSpec {
+  const char* name;
+  bool required;
+  ColTypeExpect expect;
+};
+
+// Колонки train/pretrain: обязательные — без них пайплайн не имеет смысла; остальные — если есть, тип должен быть читаем кодом.
+static const SchemaColumnSpec kTrainParquetColumns[] = {
+    {"customer_id", true, ColTypeExpect::kText},
+    {"event_id", true, ColTypeExpect::kIntKey},
+    {"operaton_amt", true, ColTypeExpect::kAmount},
+    {"event_dttm", true, ColTypeExpect::kText},
+    {"operating_system_type", false, ColTypeExpect::kText},
+    {"device_system_version", false, ColTypeExpect::kText},
+    {"mcc_code", false, ColTypeExpect::kText},
+    {"channel_indicator_type", false, ColTypeExpect::kText},
+    {"channel_indicator_sub_type", false, ColTypeExpect::kText},
+    {"channel_indicator_subtype", false, ColTypeExpect::kText},
+    {"timezone", false, ColTypeExpect::kText},
+    {"compromised", false, ColTypeExpect::kText},
+    {"web_rdp_connection", false, ColTypeExpect::kText},
+    {"phone_voip_call_state", false, ColTypeExpect::kText},
+    {"session_id", false, ColTypeExpect::kText},
+    {"browser_language", false, ColTypeExpect::kText},
+    {"event_type_nm", false, ColTypeExpect::kText},
+    {"event_descr", false, ColTypeExpect::kText},
+    {"event_desc", false, ColTypeExpect::kText},
+};
+
+static const SchemaColumnSpec kLabelsParquetColumns[] = {
+    {"event_id", true, ColTypeExpect::kIntKey},
+    {"target", true, ColTypeExpect::kIntKey},
+};
+
+static arrow::Status read_parquet_schema_only(const std::string& path, std::shared_ptr<arrow::Schema>* out_schema) {
+  arrow::MemoryPool* pool = arrow::default_memory_pool();
+  ARROW_ASSIGN_OR_RAISE(auto infile, arrow::io::ReadableFile::Open(path));
+  ARROW_ASSIGN_OR_RAISE(auto reader, parquet::arrow::OpenFile(infile, pool));
+  std::shared_ptr<arrow::Schema> schema;
+  ARROW_RETURN_NOT_OK(reader->GetSchema(&schema));
+  *out_schema = std::move(schema);
+  return arrow::Status::OK();
+}
+
+static arrow::Status validate_parquet_against_specs(const std::string& path, const char* role_tag,
+                                                    const SchemaColumnSpec* specs, size_t n_specs) {
+  std::shared_ptr<arrow::Schema> schema;
+  ARROW_RETURN_NOT_OK(read_parquet_schema_only(path, &schema));
+  for (size_t i = 0; i < n_specs; ++i) {
+    const SchemaColumnSpec& sp = specs[i];
+    auto f = schema->GetFieldByName(sp.name);
+    if (!f) {
+      if (sp.required) {
+        std::string msg = std::string(role_tag) + " " + path + ": нет обязательной колонки \"" + sp.name + "\"";
+        return arrow::Status::Invalid(msg);
+      }
+      continue;
+    }
+    arrow::Type::type tid = base_arrow_type_id(f->type());
+    if (!type_matches_expectation(tid, sp.expect)) {
+      std::string msg = std::string(role_tag) + " " + path + ": колонка \"" + sp.name + "\" имеет тип " +
+                        f->type()->ToString() +
+                        ", ожидается тип, совместимый с чтением в build_dataset (см. ColTypeExpect)";
+      return arrow::Status::Invalid(msg);
+    }
+  }
+  return arrow::Status::OK();
+}
+
+static arrow::Status validate_all_input_parquets(const std::string& labels_path,
+                                                 const std::vector<std::string>& pre_paths,
+                                                 const std::vector<std::string>& train_paths) {
+  if (!path_is_readable_file(labels_path)) {
+    return arrow::Status::Invalid("нет или недоступен файл train_labels: " + labels_path);
+  }
+  ARROW_RETURN_NOT_OK(validate_parquet_against_specs(labels_path, "[labels]", kLabelsParquetColumns,
+                                                     sizeof(kLabelsParquetColumns) / sizeof(kLabelsParquetColumns[0])));
+
+  for (const auto& p : pre_paths) {
+    if (!path_is_readable_file(p)) continue;
+    ARROW_RETURN_NOT_OK(validate_parquet_against_specs(p, "[pretrain]", kTrainParquetColumns,
+                                                       sizeof(kTrainParquetColumns) / sizeof(kTrainParquetColumns[0])));
+  }
+  for (const auto& p : train_paths) {
+    if (!path_is_readable_file(p)) continue;
+    ARROW_RETURN_NOT_OK(validate_parquet_against_specs(p, "[train]", kTrainParquetColumns,
+                                                       sizeof(kTrainParquetColumns) / sizeof(kTrainParquetColumns[0])));
+  }
+  return arrow::Status::OK();
 }
 
 static Txn row_to_txn(const arrow::RecordBatch& batch, int64_t i, const arrow::Schema& sch) {
@@ -292,6 +547,8 @@ static Txn row_to_txn(const arrow::RecordBatch& batch, int64_t i, const arrow::S
 
 struct FeatureRow {
   std::array<double, kNumFeatures> f{};
+  /** Не признак модели — только метаданные строки датасета. */
+  std::string customer_id;
   int64_t event_id = 0;
   int32_t target = 0;
   double sample_weight = 1.0;
@@ -300,43 +557,30 @@ struct FeatureRow {
 
 static double nan_val() { return std::numeric_limits<double>::quiet_NaN(); }
 
-static FeatureRow compute_features(const UserWindow& w, const arrow::RecordBatch& batch, int64_t i,
-                                 const arrow::Schema& sch,
-                                 const std::unordered_map<int64_t, int>& labels_orig) {
+static FeatureRow compute_features(const UserWindow& w, int effective_target_len, const arrow::RecordBatch& batch,
+                                   int64_t i, const arrow::Schema& sch,
+                                   const std::unordered_map<int64_t, int>& labels_orig) {
   FeatureRow out;
-  std::vector<double> amounts;
-  amounts.reserve(w.dq.size());
-  for (const auto& t : w.dq) {
-    if (t.amount.has_value() && std::isfinite(*t.amount)) amounts.push_back(*t.amount);
+
+  int64_t eid = 0;
+  int eidx = col_index(sch, "event_id");
+  if (eidx >= 0) {
+    if (auto p = col_get_int64(*batch.column(eidx), i)) eid = *p;
   }
-  size_t n_amt = amounts.size();
-  double median = nan_val();
-  double p95 = nan_val();
-  double mean = nan_val();
-  double stdv = nan_val();
-  if (n_amt > 0) {
-    std::vector<double> sorted = amounts;
-    std::sort(sorted.begin(), sorted.end());
-    if (n_amt % 2 == 1) {
-      median = sorted[n_amt / 2];
-    } else {
-      median = (sorted[n_amt / 2 - 1] + sorted[n_amt / 2]) / 2.0;
-    }
-    size_t idx95 = static_cast<size_t>(std::floor(0.95 * static_cast<double>(n_amt - 1)));
-    std::nth_element(sorted.begin(), sorted.begin() + idx95, sorted.end());
-    p95 = sorted[idx95];
-    double s = 0.0;
-    for (double a : amounts) s += a;
-    mean = s / static_cast<double>(n_amt);
-    if (n_amt >= 2) {
-      double sq = 0.0;
-      for (double a : amounts) {
-        double d = a - mean;
-        sq += d * d;
-      }
-      stdv = std::sqrt(std::max(0.0, sq / static_cast<double>(n_amt - 1)));
-    }
+  out.event_id = eid;
+
+  auto itl = labels_orig.find(eid);
+  if (itl != labels_orig.end()) {
+    out.target = 1;
+    out.sample_weight = (itl->second == 1) ? kWeightLabeled1 : kWeightLabeled0;
+  } else {
+    out.target = 0;
+    out.sample_weight = kWeightUnlabeled;
   }
+
+  const int sz = w.count();
+  const int eff = (sz <= 0) ? 0 : std::min(sz, std::max(0, effective_target_len));
+  const int start = sz - eff;
 
   auto get_row_s = [&](const char* n) -> std::string {
     int idx = col_index(sch, n);
@@ -358,6 +602,66 @@ static FeatureRow compute_features(const UserWindow& w, const arrow::RecordBatch
   int hour_val = cur_tmp.hour_val;
   int dow_val = cur_tmp.dow_py;
 
+  std::vector<double> amounts;
+  amounts.reserve(static_cast<size_t>(eff));
+  for (int k = start; k < sz; ++k) {
+    const auto& t = w.dq[static_cast<size_t>(k)];
+    if (t.amount.has_value() && std::isfinite(*t.amount)) amounts.push_back(*t.amount);
+  }
+  size_t n_amt = amounts.size();
+  double median = nan_val();
+  double p95 = nan_val();
+  double mean = nan_val();
+  double stdv = nan_val();
+  if (n_amt > 0) {
+    std::vector<double> sorted = amounts;
+    std::sort(sorted.begin(), sorted.end());
+    if (n_amt % 2 == 1) {
+      median = sorted[n_amt / 2];
+    } else {
+      median = (sorted[n_amt / 2 - 1] + sorted[n_amt / 2]) / 2.0;
+    }
+    size_t idx95 = static_cast<size_t>(std::floor(0.95 * static_cast<double>(n_amt - 1)));
+    std::nth_element(sorted.begin(), sorted.begin() + static_cast<std::ptrdiff_t>(idx95), sorted.end());
+    p95 = sorted[idx95];
+    double s = 0.0;
+    for (double a : amounts) s += a;
+    mean = s / static_cast<double>(n_amt);
+    if (n_amt >= 2) {
+      double sq = 0.0;
+      for (double a : amounts) {
+        double d = a - mean;
+        sq += d * d;
+      }
+      stdv = std::sqrt(std::max(0.0, sq / static_cast<double>(n_amt - 1)));
+    }
+  }
+
+  std::optional<double> last_amount;
+  std::string last_tz;
+  std::string last_mcc;
+  std::string last_dkey;
+  if (sz > 0) {
+    const auto& lt = w.dq[static_cast<size_t>(sz - 1)];
+    if (lt.amount.has_value() && std::isfinite(*lt.amount)) last_amount = *lt.amount;
+    last_tz = lt.tz;
+    last_mcc = lt.mcc;
+    last_dkey = lt.os_type + "\x1f" + lt.dev_ver;
+  }
+
+  double mean_last_3 = nan_val();
+  double mean_last_10 = nan_val();
+  if (!amounts.empty()) {
+    size_t from3 = (amounts.size() > 3) ? (amounts.size() - 3) : 0;
+    size_t from10 = (amounts.size() > 10) ? (amounts.size() - 10) : 0;
+    double s3 = 0.0;
+    for (size_t ai = from3; ai < amounts.size(); ++ai) s3 += amounts[ai];
+    mean_last_3 = s3 / static_cast<double>(amounts.size() - from3);
+    double s10 = 0.0;
+    for (size_t ai = from10; ai < amounts.size(); ++ai) s10 += amounts[ai];
+    mean_last_10 = s10 / static_cast<double>(amounts.size() - from10);
+  }
+
   using clock = std::chrono::system_clock;
   struct TA {
     clock::time_point t;
@@ -366,7 +670,8 @@ static FeatureRow compute_features(const UserWindow& w, const arrow::RecordBatch
   std::vector<TA> recent;
   if (dttm.has_value()) {
     auto t0 = *dttm - std::chrono::hours(24);
-    for (const auto& t : w.dq) {
+    for (int k = start; k < sz; ++k) {
+      const auto& t = w.dq[static_cast<size_t>(k)];
       if (t.dttm.has_value() && *t.dttm >= t0 && t.amount.has_value() && std::isfinite(*t.amount)) {
         recent.push_back({*t.dttm, *t.amount});
       }
@@ -396,47 +701,41 @@ static FeatureRow compute_features(const UserWindow& w, const arrow::RecordBatch
   }
 
   std::optional<clock::time_point> last_ev;
-  std::optional<clock::time_point> second_last_ev;
-  for (auto it = w.dq.rbegin(); it != w.dq.rend(); ++it) {
-    if (it->dttm.has_value()) {
-      if (!last_ev.has_value()) {
-        last_ev = it->dttm;
-      } else {
-        second_last_ev = it->dttm;
-        break;
-      }
+  for (int k = sz - 1; k >= start; --k) {
+    const auto& t = w.dq[static_cast<size_t>(k)];
+    if (t.dttm.has_value()) {
+      last_ev = t.dttm;
+      break;
     }
   }
 
-  std::unordered_map<std::string, int> dev_cnt, mcc_cnt, ch_cnt, tz_cnt, bl_cnt, descr_cnt, type_cnt;
-  std::unordered_map<std::string, clock::time_point> last_seen_dev, last_seen_mcc, last_seen_ch;
+  std::unordered_map<std::string, int> dev_cnt, mcc_cnt, ch_cnt, tz_cnt, bl_cnt, dev_tz_cnt;
   std::unordered_map<std::string, int> sess_cnt;
-  std::vector<double> gap_seconds;
-  std::optional<clock::time_point> prev_t_for_gap;
-  double last_amount_in_window = nan_val();
-  for (const auto& t : w.dq) {
+  std::unordered_map<std::string, double> sess_amount_sum;
+  std::unordered_map<std::string, clock::time_point> sess_first_dttm;
+  std::unordered_map<std::string, clock::time_point> sess_last_dttm;
+  for (int k = start; k < sz; ++k) {
+    const auto& t = w.dq[static_cast<size_t>(k)];
     std::string dkey = t.os_type + "\x1f" + t.dev_ver;
     std::string ckey = t.ch_type + "\x1f" + t.ch_sub;
     if (!empty_field(t.os_type) || !empty_field(t.dev_ver)) dev_cnt[dkey]++;
     if (!empty_field(t.mcc)) mcc_cnt[t.mcc]++;
     if (!empty_field(t.ch_type) || !empty_field(t.ch_sub)) ch_cnt[ckey]++;
     if (!empty_field(t.tz)) tz_cnt[t.tz]++;
-    if (!empty_field(t.browser_language)) bl_cnt[t.browser_language]++;
-    if (!empty_field(t.event_descr)) descr_cnt[t.event_descr]++;
-    if (!empty_field(t.event_type_nm)) type_cnt[t.event_type_nm]++;
-
-    if (t.dttm.has_value()) {
-      if (!empty_field(t.os_type) || !empty_field(t.dev_ver)) last_seen_dev[dkey] = *t.dttm;
-      if (!empty_field(t.mcc)) last_seen_mcc[t.mcc] = *t.dttm;
-      if (!empty_field(t.ch_type) || !empty_field(t.ch_sub)) last_seen_ch[ckey] = *t.dttm;
-      if (prev_t_for_gap.has_value()) {
-        double ds = static_cast<double>(std::chrono::duration_cast<std::chrono::seconds>(*t.dttm - *prev_t_for_gap).count());
-        if (std::isfinite(ds) && ds >= 0.0) gap_seconds.push_back(ds);
-      }
-      prev_t_for_gap = t.dttm;
+    if ((!empty_field(t.os_type) || !empty_field(t.dev_ver)) && !empty_field(t.tz)) {
+      dev_tz_cnt[dkey + "\x1f" + t.tz]++;
     }
-    if (t.amount.has_value() && std::isfinite(*t.amount)) last_amount_in_window = *t.amount;
-    if (!t.session_id.empty()) sess_cnt[t.session_id]++;
+    if (!empty_field(t.browser_language)) bl_cnt[t.browser_language]++;
+    if (!t.session_id.empty()) {
+      sess_cnt[t.session_id]++;
+      if (t.amount.has_value() && std::isfinite(*t.amount)) sess_amount_sum[t.session_id] += *t.amount;
+      if (t.dttm.has_value()) {
+        auto itf = sess_first_dttm.find(t.session_id);
+        if (itf == sess_first_dttm.end() || *t.dttm < itf->second) sess_first_dttm[t.session_id] = *t.dttm;
+        auto itl = sess_last_dttm.find(t.session_id);
+        if (itl == sess_last_dttm.end() || *t.dttm > itl->second) sess_last_dttm[t.session_id] = *t.dttm;
+      }
+    }
   }
 
   std::string os_c = get_row_s("operating_system_type");
@@ -448,46 +747,57 @@ static FeatureRow compute_features(const UserWindow& w, const arrow::RecordBatch
   std::string tz_c = get_row_s("timezone");
   std::string bl_c = get_row_s("browser_language");
   std::string sid_c = get_row_s("session_id");
-  std::string etype_c = get_row_s("event_type_nm");
   std::string descr = get_row_s("event_descr");
   if (descr.empty()) descr = get_row_s("event_desc");
 
   std::string dkey_c = os_c + "\x1f" + dev_c;
   std::string ckey_c = ch_t + "\x1f" + ch_s;
-  double tx_total = static_cast<double>(w.count());
-  auto safe_ratio = [&](double num, double den) -> double { return num / (std::abs(den) > kEps ? den : kEps); };
-  auto get_count = [&](const std::unordered_map<std::string, int>& mp, const std::string& key, bool key_ok) -> double {
-    if (!key_ok) return 0.0;
+  std::string dtz_key_c = dkey_c + "\x1f" + tz_c;
+
+  auto get_count_i = [&](const std::unordered_map<std::string, int>& mp, const std::string& key, bool key_ok) -> int {
+    if (!key_ok) return 0;
     auto it = mp.find(key);
-    return (it == mp.end()) ? 0.0 : static_cast<double>(it->second);
+    return (it == mp.end()) ? 0 : it->second;
   };
 
-  double device_count = get_count(dev_cnt, dkey_c, (!empty_field(os_c) || !empty_field(dev_c)));
-  double mcc_count = get_count(mcc_cnt, mcc_c, !empty_field(mcc_c));
-  double channel_count = get_count(ch_cnt, ckey_c, (!empty_field(ch_t) || !empty_field(ch_s)));
-  double timezone_count = get_count(tz_cnt, tz_c, !empty_field(tz_c));
-  double bl_count = get_count(bl_cnt, bl_c, !empty_field(bl_c));
+  int device_count_i = get_count_i(dev_cnt, dkey_c, (!empty_field(os_c) || !empty_field(dev_c)));
+  int mcc_count_i = get_count_i(mcc_cnt, mcc_c, !empty_field(mcc_c));
+  int channel_count_i = get_count_i(ch_cnt, ckey_c, (!empty_field(ch_t) || !empty_field(ch_s)));
+  int timezone_count_i = get_count_i(tz_cnt, tz_c, !empty_field(tz_c));
+  int bl_count_i = get_count_i(bl_cnt, bl_c, !empty_field(bl_c));
 
-  double device_freq = (tx_total > 0.0) ? safe_ratio(device_count, tx_total) : 0.0;
-  double mcc_freq = (tx_total > 0.0) ? safe_ratio(mcc_count, tx_total) : 0.0;
-  double channel_freq = (tx_total > 0.0) ? safe_ratio(channel_count, tx_total) : 0.0;
-  double timezone_freq = (tx_total > 0.0) ? safe_ratio(timezone_count, tx_total) : 0.0;
-  double browser_language_freq = (tx_total > 0.0) ? safe_ratio(bl_count, tx_total) : 0.0;
-
-  auto since_last = [&](const std::unordered_map<std::string, clock::time_point>& last_map, const std::string& key, bool key_ok) -> double {
-    if (!dttm.has_value() || !key_ok) return -1.0;
-    auto it = last_map.find(key);
-    if (it == last_map.end()) return -1.0;
-    return static_cast<double>(std::chrono::duration_cast<std::chrono::seconds>(*dttm - it->second).count());
-  };
-  double time_since_last_device = since_last(last_seen_dev, dkey_c, (!empty_field(os_c) || !empty_field(dev_c)));
-  double time_since_last_mcc = since_last(last_seen_mcc, mcc_c, !empty_field(mcc_c));
-  double time_since_last_channel = since_last(last_seen_ch, ckey_c, (!empty_field(ch_t) || !empty_field(ch_s)));
+  double is_new_device = 0.0;
+  if (!empty_field(os_c) || !empty_field(dev_c)) is_new_device = (device_count_i == 0) ? 1.0 : 0.0;
+  double is_new_mcc = 0.0;
+  if (!empty_field(mcc_c)) is_new_mcc = (mcc_count_i == 0) ? 1.0 : 0.0;
+  double is_new_channel = 0.0;
+  if (!empty_field(ch_t) || !empty_field(ch_s)) is_new_channel = (channel_count_i == 0) ? 1.0 : 0.0;
+  double is_new_timezone = 0.0;
+  if (!empty_field(tz_c)) is_new_timezone = (timezone_count_i == 0) ? 1.0 : 0.0;
+  double is_new_browser_language = 0.0;
+  if (!empty_field(bl_c)) is_new_browser_language = (bl_count_i == 0) ? 1.0 : 0.0;
+  double is_new_device_tz_pair = 0.0;
+  if ((!empty_field(os_c) || !empty_field(dev_c)) && !empty_field(tz_c)) {
+    is_new_device_tz_pair = (dev_tz_cnt.find(dtz_key_c) == dev_tz_cnt.end()) ? 1.0 : 0.0;
+  }
 
   int n_sess = 0;
   if (!sid_c.empty()) {
     auto it = sess_cnt.find(sid_c);
     if (it != sess_cnt.end()) n_sess = it->second;
+  }
+  double session_mean_amount = nan_val();
+  auto it_sc = sess_cnt.find(sid_c);
+  if (it_sc != sess_cnt.end() && it_sc->second > 0) {
+    double ssum = sess_amount_sum[sid_c];
+    session_mean_amount = ssum / static_cast<double>(it_sc->second);
+  }
+  double session_duration = nan_val();
+  auto it_sf = sess_first_dttm.find(sid_c);
+  auto it_sl = sess_last_dttm.find(sid_c);
+  if (it_sf != sess_first_dttm.end() && it_sl != sess_last_dttm.end()) {
+    auto sec = std::chrono::duration_cast<std::chrono::seconds>(it_sl->second - it_sf->second).count();
+    session_duration = static_cast<double>(sec);
   }
 
   double amount_to_median = nan_val();
@@ -508,28 +818,119 @@ static FeatureRow compute_features(const UserWindow& w, const arrow::RecordBatch
     time_since = static_cast<double>(sec);
   }
 
+  double amount_diff_prev = nan_val();
+  double amount_ratio_prev = nan_val();
+  if (last_amount.has_value() && std::isfinite(amount)) {
+    amount_diff_prev = amount - *last_amount;
+    amount_ratio_prev = amount / ((std::abs(*last_amount) > kEps) ? *last_amount : kEps);
+  }
+
+  double trend_mean_last_3_to_10 = nan_val();
+  if (std::isfinite(mean_last_3) && std::isfinite(mean_last_10)) {
+    trend_mean_last_3_to_10 = mean_last_3 / ((std::abs(mean_last_10) > kEps) ? mean_last_10 : kEps);
+  }
+  double amount_percentile_rank = nan_val();
+  if (!amounts.empty() && std::isfinite(amount)) {
+    int le = 0;
+    for (double a : amounts)
+      if (a <= amount) ++le;
+    amount_percentile_rank = static_cast<double>(le) / static_cast<double>(amounts.size());
+  }
+
+  std::vector<double> deltas;
+  std::optional<clock::time_point> prev_dt;
+  for (int k = start; k < sz; ++k) {
+    const auto& t = w.dq[static_cast<size_t>(k)];
+    if (!t.dttm.has_value()) continue;
+    if (prev_dt.has_value()) {
+      auto sec = std::chrono::duration_cast<std::chrono::seconds>(*t.dttm - *prev_dt).count();
+      deltas.push_back(static_cast<double>(sec));
+    }
+    prev_dt = *t.dttm;
+  }
+  double std_time_deltas = nan_val();
+  if (deltas.size() >= 2) {
+    double m = 0.0;
+    for (double d : deltas) m += d;
+    m /= static_cast<double>(deltas.size());
+    double sq = 0.0;
+    for (double d : deltas) {
+      double z = d - m;
+      sq += z * z;
+    }
+    std_time_deltas = std::sqrt(std::max(0.0, sq / static_cast<double>(deltas.size() - 1)));
+  }
+  double delta_1 = (deltas.size() >= 1) ? deltas[deltas.size() - 1] : nan_val();
+  double delta_2 = (deltas.size() >= 2) ? deltas[deltas.size() - 2] : nan_val();
+  double delta_3 = (deltas.size() >= 3) ? deltas[deltas.size() - 3] : nan_val();
+  double acceleration = nan_val();
+  if (std::isfinite(delta_1) && std::isfinite(delta_2)) {
+    acceleration = delta_1 / ((std::abs(delta_2) > kEps) ? delta_2 : kEps);
+  }
+  double std_delta_last_k = nan_val();
+  double cv_delta_last_k = nan_val();
+  if (deltas.size() >= 2) {
+    size_t from = (deltas.size() > 10) ? (deltas.size() - 10) : 0;
+    size_t n = deltas.size() - from;
+    if (n >= 2) {
+      double mk = 0.0;
+      for (size_t di = from; di < deltas.size(); ++di) mk += deltas[di];
+      mk /= static_cast<double>(n);
+      double sqk = 0.0;
+      for (size_t di = from; di < deltas.size(); ++di) {
+        double z = deltas[di] - mk;
+        sqk += z * z;
+      }
+      std_delta_last_k = std::sqrt(std::max(0.0, sqk / static_cast<double>(n - 1)));
+      cv_delta_last_k = std_delta_last_k / ((std::abs(mk) > kEps) ? mk : kEps);
+    }
+  }
+
+  double is_timezone_change = 0.0;
+  if (!empty_field(tz_c) && !empty_field(last_tz)) is_timezone_change = (tz_c != last_tz) ? 1.0 : 0.0;
+  double is_device_switch = 0.0;
+  if (!empty_field(os_c) || !empty_field(dev_c)) is_device_switch = (dkey_c != last_dkey) ? 1.0 : 0.0;
+  double is_mcc_switch = 0.0;
+  if (!empty_field(mcc_c) && !empty_field(last_mcc)) is_mcc_switch = (mcc_c != last_mcc) ? 1.0 : 0.0;
+
+  double time_since_last_device_change = nan_val();
+  double time_since_last_mcc_change = nan_val();
+  if (dttm.has_value()) {
+    for (int k = sz - 1; k >= start; --k) {
+      const auto& t = w.dq[static_cast<size_t>(k)];
+      if (!t.dttm.has_value()) continue;
+      if (!std::isfinite(time_since_last_device_change) && (!empty_field(os_c) || !empty_field(dev_c))) {
+        std::string tdkey = t.os_type + "\x1f" + t.dev_ver;
+        if (tdkey != dkey_c) {
+          auto sec = std::chrono::duration_cast<std::chrono::seconds>(*dttm - *t.dttm).count();
+          time_since_last_device_change = static_cast<double>(sec);
+        }
+      }
+      if (!std::isfinite(time_since_last_mcc_change) && !empty_field(mcc_c) && t.mcc != mcc_c) {
+        auto sec = std::chrono::duration_cast<std::chrono::seconds>(*dttm - *t.dttm).count();
+        time_since_last_mcc_change = static_cast<double>(sec);
+      }
+      if (std::isfinite(time_since_last_device_change) && std::isfinite(time_since_last_mcc_change)) break;
+    }
+  }
+
   double hour_f = dttm.has_value() ? static_cast<double>(hour_val) : nan_val();
   double dow_f = dttm.has_value() ? static_cast<double>(dow_val) : nan_val();
-  double is_night = (hour_val >= 22 || hour_val < 6) ? 1.0 : 0.0;
-  double is_weekend = (dow_val >= 5) ? 1.0 : 0.0;
+  double is_night = nan_val();
+  double is_weekend = nan_val();
+  if (dttm.has_value()) {
+    is_night = (hour_val >= 22 || hour_val < 6) ? 1.0 : 0.0;
+    is_weekend = (dow_val >= 5) ? 1.0 : 0.0;
+  }
 
-  double tr_am = static_cast<double>(std::min(w.count(), kWindowMax));
+  const double tr_am = static_cast<double>(eff);
+  const double log_1p_tx = std::log1p(std::max(0.0, tr_am));
+
   double tx_10m = static_cast<double>(count_since(std::chrono::minutes(10)));
   double tx_1h = static_cast<double>(count_since(std::chrono::hours(1)));
   double tx_24h = static_cast<double>(count_since(std::chrono::hours(24)));
   double sum_1h = sum_since(std::chrono::hours(1));
   double sum_24h = sum_since(std::chrono::hours(24));
-
-  double descr_freq = 0.0;
-  if (!empty_field(descr) && tx_total > 0.0) {
-    auto it = descr_cnt.find(descr);
-    descr_freq = safe_ratio((it == descr_cnt.end() ? 0.0 : static_cast<double>(it->second)), tx_total);
-  }
-  double etype_freq = 0.0;
-  if (!empty_field(etype_c) && tx_total > 0.0) {
-    auto it = type_cnt.find(etype_c);
-    etype_freq = safe_ratio((it == type_cnt.end() ? 0.0 : static_cast<double>(it->second)), tx_total);
-  }
 
   std::string compromised_s = trim_copy(get_row_s("compromised"));
   double compromised_flag = 0.0;
@@ -537,62 +938,10 @@ static FeatureRow compute_features(const UserWindow& w, const arrow::RecordBatch
     if (auto pc = parse_double_any(compromised_s)) compromised_flag = (*pc == 1.0) ? 1.0 : 0.0;
   }
 
-  double log_tr_amount = std::log1p(std::max(0.0, tr_am));
-  double log_tr_denom = (log_tr_amount > kEps) ? log_tr_amount : kEps;
-  double tx_10m_norm = safe_ratio(tx_10m, log_tr_denom);
-  double tx_1h_norm = safe_ratio(tx_1h, log_tr_denom);
-  double tx_24h_norm = safe_ratio(tx_24h, log_tr_denom);
-  double sum_1h_norm = safe_ratio(sum_1h, log_tr_denom);
-  double sum_24h_norm = safe_ratio(sum_24h, log_tr_denom);
-
-  double tx_10m_to_1h = tx_10m / (tx_1h + 1.0);
-  double tx_1h_to_24h = tx_1h / (tx_24h + 1.0);
-  double sum_1h_to_24h = sum_1h / (sum_24h + 1.0);
-
-  double time_since_2nd_prev = -1.0;
-  if (dttm.has_value() && second_last_ev.has_value()) {
-    time_since_2nd_prev =
-        static_cast<double>(std::chrono::duration_cast<std::chrono::seconds>(*dttm - *second_last_ev).count());
-  }
-
-  double mean_gap = -1.0;
-  double std_gap = -1.0;
-  if (!gap_seconds.empty()) {
-    double s = 0.0;
-    for (double g : gap_seconds) s += g;
-    mean_gap = s / static_cast<double>(gap_seconds.size());
-    if (gap_seconds.size() >= 2) {
-      double sq = 0.0;
-      for (double g : gap_seconds) {
-        double d = g - mean_gap;
-        sq += d * d;
-      }
-      std_gap = std::sqrt(std::max(0.0, sq / static_cast<double>(gap_seconds.size() - 1)));
-    } else {
-      std_gap = 0.0;
-    }
-  }
-
-  double amount_to_last_amount = nan_val();
-  if (std::isfinite(amount) && std::isfinite(last_amount_in_window)) {
-    amount_to_last_amount = safe_ratio(amount, last_amount_in_window + kEps);
-  }
-  double amount_to_max_24h = nan_val();
-  if (std::isfinite(amount) && std::isfinite(max_amount_feat)) {
-    amount_to_max_24h = safe_ratio(amount, max_amount_feat + kEps);
-  }
-
-  double time_since_prev_to_mean_gap = -1.0;
-  if (time_since >= 0.0 && mean_gap >= 0.0) {
-    time_since_prev_to_mean_gap = safe_ratio(time_since, mean_gap + kEps);
-  }
-
-  double device_freq_alt = safe_ratio(device_count, std::isfinite(amount) ? (amount + kEps) : kEps);
-  double mcc_freq_alt = safe_ratio(mcc_count, std::isfinite(amount) ? (amount + kEps) : kEps);
-
   int fi = 0;
   auto put = [&](double v) { out.f[fi++] = v; };
   put(amount);
+  put(log_1p_tx);
   put(amount_to_median);
   put(amount_zscore);
   put(is_amount_high);
@@ -600,17 +949,10 @@ static FeatureRow compute_features(const UserWindow& w, const arrow::RecordBatch
   put(tx_24h);
   put(sum_1h);
   put(max_amount_feat);
-  put(device_freq);
-  put(device_count);
-  put(time_since_last_device);
-  put(mcc_freq);
-  put(mcc_count);
-  put(time_since_last_mcc);
-  put(channel_freq);
-  put(channel_count);
-  put(time_since_last_channel);
-  put(timezone_freq);
-  put(browser_language_freq);
+  put(is_new_device);
+  put(is_new_mcc);
+  put(is_new_channel);
+  put(is_new_timezone);
   put(compromised_flag);
   put(empty_field(get_row_s("web_rdp_connection")) ? 0.0 : 1.0);
   put(empty_field(get_row_s("phone_voip_call_state")) ? 0.0 : 1.0);
@@ -621,48 +963,37 @@ static FeatureRow compute_features(const UserWindow& w, const arrow::RecordBatch
   put(tx_10m);
   put(sum_24h);
   put(time_since);
+  put(is_new_browser_language);
   put(static_cast<double>(n_sess + 1));
   put(empty_field(tz_c) ? 1.0 : 0.0);
   put(tr_am);
   put(cat_from_utf8(descr));
   put(cat_from_utf8(mcc_c));
-  put(descr_freq);
-  put(etype_freq);
-  put(log_tr_amount);
-  put(tx_10m_norm);
-  put(tx_1h_norm);
-  put(tx_24h_norm);
-  put(sum_1h_norm);
-  put(sum_24h_norm);
-  put(tx_10m_to_1h);
-  put(tx_1h_to_24h);
-  put(sum_1h_to_24h);
-  put(time_since_2nd_prev);
-  put(mean_gap);
-  put(std_gap);
-  put(amount_to_last_amount);
-  put(amount_to_max_24h);
-  put(time_since_prev_to_mean_gap);
-  put(device_freq_alt);
-  put(mcc_freq_alt);
+  put(amount_diff_prev);
+  put(amount_ratio_prev);
+  put(trend_mean_last_3_to_10);
+  put(amount_percentile_rank);
+  put(std_time_deltas);
+  put(is_timezone_change);
+  put(is_new_device_tz_pair);
+  put(is_device_switch);
+  put(is_mcc_switch);
+  put(session_duration);
+  put(session_mean_amount);
+  put(std::isfinite(amount_zscore) ? (amount_zscore * is_new_device) : nan_val());
+  put(std::isfinite(amount_zscore) ? (amount_zscore * is_new_mcc) : nan_val());
+  put(is_new_device * is_new_timezone);
+  put((eff > 0) ? (static_cast<double>(device_count_i) / static_cast<double>(eff)) : nan_val());
+  put(delta_1);
+  put(delta_2);
+  put(delta_3);
+  put(acceleration);
+  put(std_delta_last_k);
+  put(cv_delta_last_k);
+  put(time_since_last_device_change);
+  put(time_since_last_mcc_change);
   if (fi != kNumFeatures) {
     throw std::runtime_error("feature vector size mismatch");
-  }
-
-  int64_t eid = 0;
-  int eidx = col_index(sch, "event_id");
-  if (eidx >= 0) {
-    if (auto p = col_get_int64(*batch.column(eidx), i)) eid = *p;
-  }
-  out.event_id = eid;
-
-  auto itl = labels_orig.find(eid);
-  if (itl != labels_orig.end()) {
-    out.target = 1;
-    out.sample_weight = (itl->second == 1) ? kWeightLabeled1 : kWeightLabeled0;
-  } else {
-    out.target = 0;
-    out.sample_weight = kWeightUnlabeled;
   }
 
   return out;
@@ -698,6 +1029,7 @@ class DatasetWriter {
     for (int i = 0; i < kNumFeatures; ++i) {
       fields.push_back(arrow::field(kFeatureNames[i], arrow::float64()));
     }
+    fields.push_back(arrow::field("customer_id", arrow::utf8()));
     fields.push_back(arrow::field("event_id", arrow::int64()));
     fields.push_back(arrow::field("target", arrow::int32()));
     fields.push_back(arrow::field("sample_weight", arrow::float64()));
@@ -710,6 +1042,7 @@ class DatasetWriter {
     for (int j = 0; j < kNumFeatures; ++j) {
       ARROW_RETURN_NOT_OK(feat_builders_[j]->Append(r.f[j]));
     }
+    ARROW_RETURN_NOT_OK(cid_b_->Append(r.customer_id));
     ARROW_RETURN_NOT_OK(id_b_->Append(r.event_id));
     ARROW_RETURN_NOT_OK(tg_b_->Append(r.target));
     ARROW_RETURN_NOT_OK(w_b_->Append(r.sample_weight));
@@ -728,11 +1061,13 @@ class DatasetWriter {
       ARROW_RETURN_NOT_OK(feat_builders_[j]->Finish(&a));
       arrs.push_back(a);
     }
-    std::shared_ptr<arrow::Array> a_id, a_tg, a_w, a_dt;
+    std::shared_ptr<arrow::Array> a_cid, a_id, a_tg, a_w, a_dt;
+    ARROW_RETURN_NOT_OK(cid_b_->Finish(&a_cid));
     ARROW_RETURN_NOT_OK(id_b_->Finish(&a_id));
     ARROW_RETURN_NOT_OK(tg_b_->Finish(&a_tg));
     ARROW_RETURN_NOT_OK(w_b_->Finish(&a_w));
     ARROW_RETURN_NOT_OK(dt_b_->Finish(&a_dt));
+    arrs.push_back(a_cid);
     arrs.push_back(a_id);
     arrs.push_back(a_tg);
     arrs.push_back(a_w);
@@ -778,6 +1113,7 @@ class DatasetWriter {
     for (int i = 0; i < kNumFeatures; ++i) {
       feat_builders_.push_back(std::make_shared<arrow::DoubleBuilder>());
     }
+    cid_b_ = std::make_shared<arrow::StringBuilder>();
     id_b_ = std::make_shared<arrow::Int64Builder>();
     tg_b_ = std::make_shared<arrow::Int32Builder>();
     w_b_ = std::make_shared<arrow::DoubleBuilder>();
@@ -787,6 +1123,7 @@ class DatasetWriter {
   std::string out_path_;
   std::shared_ptr<arrow::Schema> schema_;
   std::vector<std::shared_ptr<arrow::DoubleBuilder>> feat_builders_;
+  std::shared_ptr<arrow::StringBuilder> cid_b_;
   std::shared_ptr<arrow::Int64Builder> id_b_;
   std::shared_ptr<arrow::Int32Builder> tg_b_;
   std::shared_ptr<arrow::DoubleBuilder> w_b_;
@@ -830,7 +1167,14 @@ static arrow::Status process_file(const std::string& path, bool is_train,
       if (ck.empty()) continue;
       UserWindow& w = (*win_map)[ck];
       if (is_train) {
-        FeatureRow fr = compute_features(w, batch, i, sch, labels);
+        int64_t eid_row = 0;
+        int eidx = col_index(sch, "event_id");
+        if (eidx >= 0) {
+          if (auto p = col_get_int64(*batch.column(eidx), i)) eid_row = *p;
+        }
+        int target_len = sample_effective_window_target(eid_row, ck);
+        FeatureRow fr = compute_features(w, target_len, batch, i, sch, labels);
+        fr.customer_id = ck;
         ARROW_RETURN_NOT_OK(wr->append(fr));
       }
       w.push(row_to_txn(batch, i, sch));
@@ -861,6 +1205,20 @@ int main(int argc, char** argv) {
   }
 
   std::unordered_map<int64_t, int> labels_orig;
+  std::vector<std::string> pre = {data_train + "pretrain_part_1.parquet", data_train + "pretrain_part_2.parquet",
+                                  data_train + "pretrain_part_3.parquet"};
+  std::vector<std::string> tr = {data_train + "train_part_1.parquet", data_train + "train_part_2.parquet",
+                                 data_train + "train_part_3.parquet"};
+
+  {
+    arrow::Status vst = validate_all_input_parquets(labels_path, pre, tr);
+    if (!vst.ok()) {
+      std::cerr << "[build_dataset] Проверка схем parquet: ОШИБКА — " << vst.ToString() << "\n";
+      return 1;
+    }
+    log_msg("проверка схем parquet (labels + существующие pretrain/train): OK");
+  }
+
   if (!load_labels(labels_path, &labels_orig).ok()) {
     std::cerr << "[build_dataset] Failed to read labels: " << labels_path << "\n";
     return 1;
@@ -869,11 +1227,6 @@ int main(int argc, char** argv) {
 
   DatasetWriter wr(out_path);
   std::unordered_map<std::string, UserWindow> windows;
-
-  std::vector<std::string> pre = {data_train + "pretrain_part_1.parquet", data_train + "pretrain_part_2.parquet",
-                                  data_train + "pretrain_part_3.parquet"};
-  std::vector<std::string> tr = {data_train + "train_part_1.parquet", data_train + "train_part_2.parquet",
-                                 data_train + "train_part_3.parquet"};
 
   log_msg("phase: pretrain files (window fill, no dataset rows)");
   for (const auto& p : pre) {

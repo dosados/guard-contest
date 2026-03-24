@@ -9,7 +9,7 @@ import statistics
 from datetime import datetime, timedelta
 from typing import Any, Mapping
 
-from shared.parquet_batch_aggregates import UserAggregates, WindowTxn, effective_window_size, row_to_window_txn
+from shared.parquet_batch_aggregates import UserAggregates, WindowTxn, row_to_window_txn
 
 logger = logging.getLogger(__name__)
 EPS = 1e-9
@@ -25,6 +25,7 @@ def _percentile_95(values: list[float]) -> float:
 
 FEATURE_NAMES: list[str] = [
     "operation_amt",
+    "log_1_plus_transactions_seen",
     "amount_to_median",
     "amount_zscore",
     "is_amount_high",
@@ -32,17 +33,10 @@ FEATURE_NAMES: list[str] = [
     "transactions_last_24h",
     "sum_amount_last_1h",
     "max_amount_last_24h",
-    "device_freq",
-    "device_count",
-    "time_since_last_device",
-    "mcc_freq",
-    "mcc_count",
-    "time_since_last_mcc",
-    "channel_freq",
-    "channel_count",
-    "time_since_last_channel",
-    "timezone_freq",
-    "browser_language_freq",
+    "is_new_device",
+    "is_new_mcc",
+    "is_new_channel",
+    "is_new_timezone",
     "is_compromised_device",
     "web_rdp_connection",
     "phone_voip_call_state",
@@ -53,30 +47,35 @@ FEATURE_NAMES: list[str] = [
     "transactions_last_10m",
     "sum_amount_last_24h",
     "time_since_prev_transaction",
+    "is_new_browser_language",
     "transactions_in_session",
     "timezone_missing",
     "tr_amount",
     "event_descr",
     "mcc_code",
-    "event_descr_freq",
-    "event_type_nm_freq",
-    "log_tr_amount",
-    "transactions_last_10m_norm",
-    "transactions_last_1h_norm",
-    "transactions_last_24h_norm",
-    "sum_amount_last_1h_norm",
-    "sum_amount_last_24h_norm",
-    "transactions_last_10m_to_1h",
-    "transactions_last_1h_to_24h",
-    "sum_1h_to_24h",
-    "time_since_2nd_prev_transaction",
-    "mean_time_between_tx",
-    "std_time_between_tx",
-    "amount_to_last_amount",
-    "amount_to_max_24h",
-    "time_since_prev_to_mean_gap",
-    "device_freq_alt",
-    "mcc_freq_alt",
+    "amount_diff_prev",
+    "amount_ratio_prev",
+    "trend_mean_last_3_to_10",
+    "amount_percentile_rank",
+    "std_time_deltas",
+    "is_timezone_change",
+    "is_new_device_tz_pair",
+    "is_device_switch",
+    "is_mcc_switch",
+    "session_duration",
+    "session_mean_amount",
+    "amount_zscore_x_is_new_device",
+    "amount_zscore_x_is_new_mcc",
+    "is_new_device_x_is_new_timezone",
+    "device_freq",
+    "delta_1",
+    "delta_2",
+    "delta_3",
+    "acceleration_delta_1_over_2",
+    "std_delta_last_k",
+    "cv_delta_last_k",
+    "time_since_last_device_change",
+    "time_since_last_mcc_change",
 ]
 
 
@@ -134,6 +133,8 @@ def compute_features(
     """
     Фичи по окну до текущей строки (текущая строка ещё не в окне).
     tr_amount — число транзакций в окне; по умолчанию len(agg).
+    Для tr_amount и log_1_plus_transactions_seen: если у agg.window_transaction_cap задан лимит,
+    значения режутся по нему; если None (инференс без лимита) — используется полный размер окна.
     """
     window: list[WindowTxn] = list(agg._window)  # noqa: SLF001 — осознанный доступ к окну
     if tr_amount is None:
@@ -197,6 +198,19 @@ def compute_features(
             return float("nan")
         return float(max(a for _, a in recent))
 
+    last_txn: WindowTxn | None = window[-1] if window else None
+    last_amount = last_txn.amount if last_txn is not None else None
+    last_tz = last_txn.tz if last_txn is not None else None
+    last_mcc = last_txn.mcc if last_txn is not None else None
+    last_dkey = (last_txn.os_type, last_txn.dev_ver) if last_txn is not None else (None, None)
+
+    mean_last_3 = float("nan")
+    if n_amt >= 1:
+        mean_last_3 = float(statistics.mean(amounts[-3:]))
+    mean_last_10 = float("nan")
+    if n_amt >= 1:
+        mean_last_10 = float(statistics.mean(amounts[-10:]))
+
     last_event_dttm: datetime | None = None
     for t in reversed(window):
         if t.dttm is not None:
@@ -207,16 +221,12 @@ def compute_features(
     seen_mcc: dict[Any, int] = {}
     seen_channels: dict[tuple[Any, Any], int] = {}
     seen_tz: dict[Any, int] = {}
+    seen_device_tz: dict[tuple[Any, Any, Any], int] = {}
     seen_bl: dict[Any, int] = {}
-    seen_descr: dict[Any, int] = {}
-    seen_type: dict[Any, int] = {}
-    last_seen_dev: dict[tuple[Any, Any], datetime] = {}
-    last_seen_mcc: dict[Any, datetime] = {}
-    last_seen_channel: dict[tuple[Any, Any], datetime] = {}
     session_counts: dict[Any, int] = {}
-    gap_seconds: list[float] = []
-    prev_gap_t: datetime | None = None
-    last_amount: float = float("nan")
+    session_amount_sums: dict[Any, float] = {}
+    session_first_dttm: dict[Any, datetime] = {}
+    session_last_dttm: dict[Any, datetime] = {}
     for t in window:
         dkey = (t.os_type, t.dev_ver)
         ckey = (t.ch_type, t.ch_sub)
@@ -224,33 +234,27 @@ def compute_features(
             seen_devices[dkey] = seen_devices.get(dkey, 0) + 1
         if t.mcc is not None and not (isinstance(t.mcc, str) and not str(t.mcc).strip()):
             seen_mcc[t.mcc] = seen_mcc.get(t.mcc, 0) + 1
-        if t.ch_type is not None or t.ch_sub is not None:
+        if not _empty_str(t.ch_type) or not _empty_str(t.ch_sub):
             seen_channels[ckey] = seen_channels.get(ckey, 0) + 1
         if not _empty_str(t.tz):
             seen_tz[t.tz] = seen_tz.get(t.tz, 0) + 1
+        if (not _empty_str(t.os_type) or not _empty_str(t.dev_ver)) and not _empty_str(t.tz):
+            dtz_key = (t.os_type, t.dev_ver, t.tz)
+            seen_device_tz[dtz_key] = seen_device_tz.get(dtz_key, 0) + 1
         if not _empty_str(t.browser_language):
             seen_bl[t.browser_language] = seen_bl.get(t.browser_language, 0) + 1
-        if not _empty_str(t.event_descr):
-            seen_descr[t.event_descr] = seen_descr.get(t.event_descr, 0) + 1
-        if not _empty_str(t.event_type_nm):
-            seen_type[t.event_type_nm] = seen_type.get(t.event_type_nm, 0) + 1
-        if t.dttm is not None:
-            if not _empty_str(t.os_type) or not _empty_str(t.dev_ver):
-                last_seen_dev[dkey] = t.dttm
-            if t.mcc is not None and not (isinstance(t.mcc, str) and not str(t.mcc).strip()):
-                last_seen_mcc[t.mcc] = t.dttm
-            if t.ch_type is not None or t.ch_sub is not None:
-                last_seen_channel[ckey] = t.dttm
-            if prev_gap_t is not None:
-                gs = (t.dttm - prev_gap_t).total_seconds()
-                if math.isfinite(gs) and gs >= 0.0:
-                    gap_seconds.append(float(gs))
-            prev_gap_t = t.dttm
-        if t.amount is not None and math.isfinite(t.amount):
-            last_amount = t.amount
         sid = t.session_id
         if sid is not None:
             session_counts[sid] = session_counts.get(sid, 0) + 1
+            if t.amount is not None and math.isfinite(t.amount):
+                session_amount_sums[sid] = session_amount_sums.get(sid, 0.0) + float(t.amount)
+            if t.dttm is not None:
+                prev_first = session_first_dttm.get(sid)
+                prev_last = session_last_dttm.get(sid)
+                if prev_first is None or t.dttm < prev_first:
+                    session_first_dttm[sid] = t.dttm
+                if prev_last is None or t.dttm > prev_last:
+                    session_last_dttm[sid] = t.dttm
 
     os_c = row.get("operating_system_type")
     dev_c = row.get("device_system_version")
@@ -261,34 +265,40 @@ def compute_features(
     bl_c = row.get("browser_language")
     sid_c = row.get("session_id")
 
-    tx_total = float(len(window))
     dkey_c = (os_c, dev_c)
     ckey_c = (ch_t, ch_s)
-    device_count = float(seen_devices.get(dkey_c, 0)) if (not _empty_str(os_c) or not _empty_str(dev_c)) else 0.0
-    mcc_count = float(seen_mcc.get(mcc_c, 0)) if not _empty_str(mcc_c) else 0.0
-    channel_count = float(seen_channels.get(ckey_c, 0)) if (ch_t is not None or ch_s is not None) else 0.0
-    timezone_count = float(seen_tz.get(tz_c, 0)) if not _empty_str(tz_c) else 0.0
-    bl_count = float(seen_bl.get(bl_c, 0)) if not _empty_str(bl_c) else 0.0
+    dtz_key_c = (os_c, dev_c, tz_c)
+    device_count_i = int(seen_devices.get(dkey_c, 0)) if (not _empty_str(os_c) or not _empty_str(dev_c)) else 0
+    mcc_count_i = int(seen_mcc.get(mcc_c, 0)) if not _empty_str(mcc_c) else 0
+    channel_count_i = int(seen_channels.get(ckey_c, 0)) if (not _empty_str(ch_t) or not _empty_str(ch_s)) else 0
+    timezone_count_i = int(seen_tz.get(tz_c, 0)) if not _empty_str(tz_c) else 0
+    bl_count_i = int(seen_bl.get(bl_c, 0)) if not _empty_str(bl_c) else 0
 
-    device_freq = _safe_div(device_count, tx_total) if tx_total > 0 else 0.0
-    mcc_freq = _safe_div(mcc_count, tx_total) if tx_total > 0 else 0.0
-    channel_freq = _safe_div(channel_count, tx_total) if tx_total > 0 else 0.0
-    timezone_freq = _safe_div(timezone_count, tx_total) if tx_total > 0 else 0.0
-    browser_language_freq = _safe_div(bl_count, tx_total) if tx_total > 0 else 0.0
+    is_new_device = 1.0 if (not _empty_str(os_c) or not _empty_str(dev_c)) and device_count_i == 0 else 0.0
+    is_new_mcc = 1.0 if not _empty_str(mcc_c) and mcc_count_i == 0 else 0.0
+    is_new_channel = 1.0 if (not _empty_str(ch_t) or not _empty_str(ch_s)) and channel_count_i == 0 else 0.0
+    is_new_timezone = 1.0 if not _empty_str(tz_c) and timezone_count_i == 0 else 0.0
+    is_new_browser_language = 1.0 if not _empty_str(bl_c) and bl_count_i == 0 else 0.0
+    is_new_device_tz_pair = (
+        1.0
+        if (not _empty_str(os_c) or not _empty_str(dev_c)) and not _empty_str(tz_c) and seen_device_tz.get(dtz_key_c, 0) == 0
+        else 0.0
+    )
 
     n_sess = session_counts.get(sid_c, 0) if sid_c is not None else 0
+    if sid_c is not None and sid_c in session_counts:
+        sess_cnt = float(session_counts[sid_c])
+        sess_sum = float(session_amount_sums.get(sid_c, 0.0))
+        session_mean_amount = sess_sum / max(sess_cnt, 1.0)
+    else:
+        session_mean_amount = float("nan")
 
-    def _since_last(last_map: Mapping[Any, datetime], key: Any, key_ok: bool) -> float:
-        if dttm is None or not key_ok:
-            return -1.0
-        dt = last_map.get(key)
-        if dt is None:
-            return -1.0
-        return float((dttm - dt).total_seconds())
-
-    time_since_last_device = _since_last(last_seen_dev, dkey_c, (not _empty_str(os_c) or not _empty_str(dev_c)))
-    time_since_last_mcc = _since_last(last_seen_mcc, mcc_c, not _empty_str(mcc_c))
-    time_since_last_channel = _since_last(last_seen_channel, ckey_c, (ch_t is not None or ch_s is not None))
+    sf = session_first_dttm.get(sid_c) if sid_c is not None else None
+    sl = session_last_dttm.get(sid_c) if sid_c is not None else None
+    if sf is not None and sl is not None:
+        session_duration = float((sl - sf).total_seconds())
+    else:
+        session_duration = float("nan")
 
     if not math.isnan(median) and median != 0.0:
         amount_to_median = amount / median
@@ -319,65 +329,96 @@ def compute_features(
     else:
         time_since_prev = float(tsp)
 
-    second_last_event_dttm: datetime | None = None
-    seen_t = 0
-    for t in reversed(window):
-        if t.dttm is not None:
-            seen_t += 1
-            if seen_t == 2:
-                second_last_event_dttm = t.dttm
-                break
-    if dttm is not None and second_last_event_dttm is not None:
-        time_since_2nd_prev = float((dttm - second_last_event_dttm).total_seconds())
+    if last_amount is not None and math.isfinite(last_amount) and not math.isnan(amount):
+        amount_diff_prev = amount - last_amount
+        amount_ratio_prev = _safe_div(amount, last_amount)
     else:
-        time_since_2nd_prev = -1.0
+        amount_diff_prev = float("nan")
+        amount_ratio_prev = float("nan")
+
+    trend_mean_last_3_to_10 = (
+        _safe_div(mean_last_3, mean_last_10)
+        if (not math.isnan(mean_last_3) and not math.isnan(mean_last_10))
+        else float("nan")
+    )
+    if n_amt > 0 and not math.isnan(amount):
+        amount_percentile_rank = float(sum(1 for a in amounts if a <= amount)) / float(n_amt)
+    else:
+        amount_percentile_rank = float("nan")
+
+    dttms = [t.dttm for t in window if t.dttm is not None]
+    deltas: list[float] = []
+    for i in range(1, len(dttms)):
+        deltas.append(float((dttms[i] - dttms[i - 1]).total_seconds()))
+    if len(deltas) >= 2:
+        std_time_deltas = float(statistics.stdev(deltas))
+    else:
+        std_time_deltas = float("nan")
+
+    is_timezone_change = 1.0 if (not _empty_str(tz_c) and not _empty_str(last_tz) and tz_c != last_tz) else 0.0
+    is_device_switch = 1.0 if (not _empty_str(os_c) or not _empty_str(dev_c)) and dkey_c != last_dkey else 0.0
+    is_mcc_switch = 1.0 if not _empty_str(mcc_c) and not _empty_str(last_mcc) and mcc_c != last_mcc else 0.0
+
+    delta_1 = deltas[-1] if len(deltas) >= 1 else float("nan")
+    delta_2 = deltas[-2] if len(deltas) >= 2 else float("nan")
+    delta_3 = deltas[-3] if len(deltas) >= 3 else float("nan")
+    acceleration = _safe_div(delta_1, delta_2) if (not math.isnan(delta_1) and not math.isnan(delta_2)) else float("nan")
+
+    last_k = deltas[-10:]
+    if len(last_k) >= 2:
+        std_delta_last_k = float(statistics.stdev(last_k))
+        mean_delta_last_k = float(statistics.mean(last_k))
+        cv_delta_last_k = _safe_div(std_delta_last_k, mean_delta_last_k)
+    else:
+        std_delta_last_k = float("nan")
+        cv_delta_last_k = float("nan")
+
+    time_since_last_device_change = float("nan")
+    time_since_last_mcc_change = float("nan")
+    if dttm is not None:
+        for t in reversed(window):
+            td = t.dttm
+            if td is None:
+                continue
+            if math.isnan(time_since_last_device_change):
+                if (not _empty_str(os_c) or not _empty_str(dev_c)) and (t.os_type, t.dev_ver) != dkey_c:
+                    time_since_last_device_change = float((dttm - td).total_seconds())
+            if math.isnan(time_since_last_mcc_change):
+                if not _empty_str(mcc_c) and t.mcc != mcc_c:
+                    time_since_last_mcc_change = float((dttm - td).total_seconds())
+            if not math.isnan(time_since_last_device_change) and not math.isnan(time_since_last_mcc_change):
+                break
 
     descr = row.get("event_descr")
     if descr is None:
         descr = row.get("event_desc")
-    etype = row.get("event_type_nm")
 
     hour_f = float(hour_val) if dttm is not None else float("nan")
     dow_f = float(dow_val) if dttm is not None else float("nan")
 
-    is_night = 1.0 if (hour_val >= 22 or hour_val < 6) else 0.0
-    is_weekend = 1.0 if dow_val >= 5 else 0.0
+    if dttm is not None:
+        is_night = 1.0 if (hour_val >= 22 or hour_val < 6) else 0.0
+        is_weekend = 1.0 if dow_val >= 5 else 0.0
+    else:
+        is_night = float("nan")
+        is_weekend = float("nan")
 
     tx_10m = float(count_since(timedelta(minutes=10)))
     tx_1h = float(count_since(timedelta(hours=1)))
     tx_24h = float(count_since(timedelta(hours=24)))
     sum_1h = sum_since(timedelta(hours=1))
     sum_24h = sum_since(timedelta(hours=24))
-    descr_freq = _safe_div(float(seen_descr.get(descr, 0)), tx_total) if (tx_total > 0 and not _empty_str(descr)) else 0.0
-    etype_freq = _safe_div(float(seen_type.get(etype, 0)), tx_total) if (tx_total > 0 and not _empty_str(etype)) else 0.0
 
-    log_tr_amount = math.log1p(max(0.0, float(tr_amount)))
-    log_den = log_tr_amount if log_tr_amount > EPS else EPS
-    tx_10m_norm = _safe_div(tx_10m, log_den)
-    tx_1h_norm = _safe_div(tx_1h, log_den)
-    tx_24h_norm = _safe_div(tx_24h, log_den)
-    sum_1h_norm = _safe_div(sum_1h, log_den)
-    sum_24h_norm = _safe_div(sum_24h, log_den)
-
-    tx_10m_to_1h = tx_10m / (tx_1h + 1.0)
-    tx_1h_to_24h = tx_1h / (tx_24h + 1.0)
-    sum_1h_to_24h = sum_1h / (sum_24h + 1.0)
-
-    if gap_seconds:
-        mean_gap = float(statistics.mean(gap_seconds))
-        std_gap = float(statistics.stdev(gap_seconds)) if len(gap_seconds) >= 2 else 0.0
+    cap = agg.window_transaction_cap
+    if cap is None:
+        tr_cap = float(tr_amount)
     else:
-        mean_gap = -1.0
-        std_gap = -1.0
-
-    amount_to_last_amount = _safe_div(amount, last_amount + EPS) if (math.isfinite(amount) and math.isfinite(last_amount)) else float("nan")
-    amount_to_max_24h = _safe_div(amount, max_amount_last_24h_feat + EPS) if math.isfinite(amount) else float("nan")
-    time_since_prev_to_mean_gap = _safe_div(time_since_prev, mean_gap + EPS) if (time_since_prev >= 0.0 and mean_gap >= 0.0) else -1.0
-    device_freq_alt = _safe_div(device_count, amount + EPS) if math.isfinite(amount) else _safe_div(device_count, EPS)
-    mcc_freq_alt = _safe_div(mcc_count, amount + EPS) if math.isfinite(amount) else _safe_div(mcc_count, EPS)
+        tr_cap = float(min(tr_amount, float(cap)))
+    log_1_plus_transactions_seen = math.log1p(max(0.0, tr_cap))
 
     return {
         "operation_amt": amount,
+        "log_1_plus_transactions_seen": log_1_plus_transactions_seen,
         "amount_to_median": amount_to_median,
         "amount_zscore": amount_zscore,
         "is_amount_high": is_amount_high,
@@ -385,17 +426,10 @@ def compute_features(
         "transactions_last_24h": tx_24h,
         "sum_amount_last_1h": sum_1h,
         "max_amount_last_24h": max_amount_last_24h_feat,
-        "device_freq": device_freq,
-        "device_count": device_count,
-        "time_since_last_device": time_since_last_device,
-        "mcc_freq": mcc_freq,
-        "mcc_count": mcc_count,
-        "time_since_last_mcc": time_since_last_mcc,
-        "channel_freq": channel_freq,
-        "channel_count": channel_count,
-        "time_since_last_channel": time_since_last_channel,
-        "timezone_freq": timezone_freq,
-        "browser_language_freq": browser_language_freq,
+        "is_new_device": is_new_device,
+        "is_new_mcc": is_new_mcc,
+        "is_new_channel": is_new_channel,
+        "is_new_timezone": is_new_timezone,
         "is_compromised_device": _compromised_binary(row.get("compromised")),
         "web_rdp_connection": _flag_nonempty(row.get("web_rdp_connection")),
         "phone_voip_call_state": _flag_nonempty(row.get("phone_voip_call_state")),
@@ -406,28 +440,33 @@ def compute_features(
         "transactions_last_10m": tx_10m,
         "sum_amount_last_24h": sum_24h,
         "time_since_prev_transaction": time_since_prev,
+        "is_new_browser_language": is_new_browser_language,
         "transactions_in_session": float(n_sess + 1),
         "timezone_missing": 1.0 if _empty_str(tz_c) else 0.0,
-        "tr_amount": float(min(tr_amount, float(effective_window_size()))),
+        "tr_amount": tr_cap,
         "event_descr": cat_to_float(descr),
         "mcc_code": cat_to_float(mcc_c),
-        "event_descr_freq": descr_freq,
-        "event_type_nm_freq": etype_freq,
-        "log_tr_amount": log_tr_amount,
-        "transactions_last_10m_norm": tx_10m_norm,
-        "transactions_last_1h_norm": tx_1h_norm,
-        "transactions_last_24h_norm": tx_24h_norm,
-        "sum_amount_last_1h_norm": sum_1h_norm,
-        "sum_amount_last_24h_norm": sum_24h_norm,
-        "transactions_last_10m_to_1h": tx_10m_to_1h,
-        "transactions_last_1h_to_24h": tx_1h_to_24h,
-        "sum_1h_to_24h": sum_1h_to_24h,
-        "time_since_2nd_prev_transaction": time_since_2nd_prev,
-        "mean_time_between_tx": mean_gap,
-        "std_time_between_tx": std_gap,
-        "amount_to_last_amount": amount_to_last_amount,
-        "amount_to_max_24h": amount_to_max_24h,
-        "time_since_prev_to_mean_gap": time_since_prev_to_mean_gap,
-        "device_freq_alt": device_freq_alt,
-        "mcc_freq_alt": mcc_freq_alt,
+        "amount_diff_prev": amount_diff_prev,
+        "amount_ratio_prev": amount_ratio_prev,
+        "trend_mean_last_3_to_10": trend_mean_last_3_to_10,
+        "amount_percentile_rank": amount_percentile_rank,
+        "std_time_deltas": std_time_deltas,
+        "is_timezone_change": is_timezone_change,
+        "is_new_device_tz_pair": is_new_device_tz_pair,
+        "is_device_switch": is_device_switch,
+        "is_mcc_switch": is_mcc_switch,
+        "session_duration": session_duration,
+        "session_mean_amount": session_mean_amount,
+        "amount_zscore_x_is_new_device": amount_zscore * is_new_device if not math.isnan(amount_zscore) else float("nan"),
+        "amount_zscore_x_is_new_mcc": amount_zscore * is_new_mcc if not math.isnan(amount_zscore) else float("nan"),
+        "is_new_device_x_is_new_timezone": is_new_device * is_new_timezone,
+        "device_freq": _safe_div(float(device_count_i), float(len(window))) if len(window) > 0 else float("nan"),
+        "delta_1": delta_1,
+        "delta_2": delta_2,
+        "delta_3": delta_3,
+        "acceleration_delta_1_over_2": acceleration,
+        "std_delta_last_k": std_delta_last_k,
+        "cv_delta_last_k": cv_delta_last_k,
+        "time_since_last_device_change": time_since_last_device_change,
+        "time_since_last_mcc_change": time_since_last_mcc_change,
     }

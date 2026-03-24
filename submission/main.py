@@ -24,6 +24,7 @@ from shared.config import (
     MODEL_LR_PATH,
     MODEL_PATH,
     MODEL_RF_PATH,
+    MODEL_TORCH_PATH,
     MODEL_XGB_PATH,
     OUTPUT_DIR,
     PRETEST_PATH,
@@ -114,7 +115,8 @@ def load_predictor(model_name: str):
         return pred
 
     raise ValueError(
-        f"Неизвестная модель: {model_name}. Используйте catboost, xgboost, lightgbm, random_forest, logistic_regression."
+        f"Неизвестная модель: {model_name}. Используйте catboost, xgboost, lightgbm, random_forest, "
+        "logistic_regression или torch (см. --model torch)."
     )
 
 
@@ -129,19 +131,26 @@ def main() -> None:
         "--model",
         "-m",
         default="catboost",
-        help="catboost | xgboost | lightgbm | random_forest | logistic_regression",
+        help="catboost | xgboost | lightgbm | random_forest | logistic_regression | torch",
     )
     args = parser.parse_args()
 
+    model_key = args.model.lower().strip()
+    use_torch = model_key in ("torch", "lstm", "tabular_lstm")
     logger.info("Модель: %s", args.model)
-    predict_fn = load_predictor(args.model)
+    predict_fn = None if use_torch else load_predictor(args.model)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     pretest_paths = [PRETEST_PATH] if PRETEST_PATH.exists() else []
-    aggregates: defaultdict[object, UserAggregates] = defaultdict(UserAggregates)
+    aggregates: defaultdict[object, UserAggregates] = defaultdict(lambda: UserAggregates(unlimited=True))
     if pretest_paths:
-        logger.info("Построение агрегатов по pretest: %s", pretest_paths)
-        built = build_windowed_aggregates(pretest_paths, batch_size=BATCH_SIZE, show_progress=True)
+        logger.info("Построение агрегатов по pretest (окно без лимита по числу транзакций): %s", pretest_paths)
+        built = build_windowed_aggregates(
+            pretest_paths,
+            batch_size=BATCH_SIZE,
+            show_progress=True,
+            unlimited_window=True,
+        )
         for k, v in built.items():
             aggregates[k] = v
     else:
@@ -154,8 +163,8 @@ def main() -> None:
         cols.append(EVENT_ID_COLUMN)
 
     event_ids: list[int] = []
-    logits: list[float] = []
     feature_matrix: list[dict[str, float]] = []
+    customer_row_ids: list[object] = []
 
     logger.info("Разбор test и расчёт фич: %s", TEST_PATH)
     for row in iter_parquet_rows(
@@ -178,11 +187,26 @@ def main() -> None:
             continue
         event_ids.append(int(eid_raw))
         feature_matrix.append(feats)
+        customer_row_ids.append(cid)
         agg.update(row)
 
     logger.info("Предсказание: матрица %d × %d", len(feature_matrix), len(MODEL_INPUT_FEATURES))
-    X = pd.DataFrame(feature_matrix)[MODEL_INPUT_FEATURES]
-    logits_arr = predict_fn(X)
+    if use_torch:
+        import torch
+
+        from torch_model.predict import load_tabular_lstm, logits_stateful_sequence
+
+        if not MODEL_TORCH_PATH.exists():
+            raise FileNotFoundError(f"Нет чекпоинта {MODEL_TORCH_PATH}. Обучите: PYTHONPATH=. python torch_model/train.py")
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        lstm = load_tabular_lstm(MODEL_TORCH_PATH, device)
+        logits_arr = logits_stateful_sequence(
+            lstm, device, customer_row_ids, feature_matrix, MODEL_INPUT_FEATURES
+        )
+    else:
+        assert predict_fn is not None
+        X = pd.DataFrame(feature_matrix)[MODEL_INPUT_FEATURES]
+        logits_arr = predict_fn(X)
 
     out = pd.DataFrame({"event_id": event_ids, "predict": logits_arr.astype(np.float64)})
     out_path = OUTPUT_DIR / "submission.csv"

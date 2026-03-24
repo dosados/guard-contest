@@ -1,0 +1,1407 @@
+Подробный отчёт по распределению количества записей на пользователя
+==============================================================================
+
+[pretrain_parts]
+------------------------------------------------------------------------------
+Источники:
+  - data/train/pretrain_part_1.parquet
+  - data/train/pretrain_part_2.parquet
+  - data/train/pretrain_part_3.parquet
+Всего записей (суммарно): 90939957
+Уникальных пользователей: 100000
+Среднее: 909.3996
+Std: 482.1792
+Медиана: 860.0000
+Квантили: min=24, p1=130, p5=222, p10=306, p25=519, p50=860, p75=1251, p90=1572, p95=1745, p99=2109, max=3318
+
+Топ-100 значений 'записей на пользователя' по числу пользователей:
+  records=   483 | users=     103 | share=  0.103%
+  records=   541 | users=      97 | share=  0.097%
+  records=   788 | users=      96 | share=  0.096%
+  records=   518 | users=      94 | share=  0.094%
+  records=   914 | users=      94 | share=  0.094%
+  records=   332 | users=      94 | share=  0.094%
+  records=   765 | users=      93 | share=  0.093%
+  records=   844 | users=      92 | share=  0.092%
+  records=   648 | users=      92 | share=  0.092%
+  records=   603 | users=      91 | share=  0.091%
+  records=   719 | users=      91 | share=  0.091%
+  records=   642 | users=      91 | share=  0.091%
+  records=   394 | users=      91 | share=  0.091%
+  records=   776 | users=      91 | share=  0.091%
+  records=   857 | users=      89 | share=  0.089%
+  records=   853 | users=      89 | share=  0.089%
+  records=   594 | users=      89 | share=  0.089%
+  records=   616 | users=      89 | share=  0.089%
+  records=   591 | users=      89 | share=  0.089%
+  records=   454 | users=      88 | share=  0.088%
+  records=   593 | users=      88 | share=  0.088%
+  records=   626 | users=      88 | share=  0.088%
+  records=   494 | users=      88 | share=  0.088%
+  records=   627 | users=      88 | share=  0.088%
+  records=   808 | users=      88 | share=  0.088%
+  records=   570 | users=      88 | share=  0.088%
+  records=   615 | users=      87 | share=  0.087%
+  records=   601 | users=      87 | share=  0.087%
+  records=   663 | users=      87 | share=  0.087%
+  records=   805 | users=      87 | share=  0.087%
+  records=   777 | users=      87 | share=  0.087%
+  records=   557 | users=      87 | share=  0.087%
+  records=   643 | users=      87 | share=  0.087%
+  records=   723 | users=      86 | share=  0.086%
+  records=   836 | users=      86 | share=  0.086%
+  records=   781 | users=      86 | share=  0.086%
+  records=   622 | users=      86 | share=  0.086%
+  records=   649 | users=      86 | share=  0.086%
+  records=   343 | users=      86 | share=  0.086%
+  records=   827 | users=      85 | share=  0.085%
+  records=   532 | users=      85 | share=  0.085%
+  records=   504 | users=      85 | share=  0.085%
+  records=   693 | users=      85 | share=  0.085%
+  records=   583 | users=      85 | share=  0.085%
+  records=   654 | users=      84 | share=  0.084%
+  records=   685 | users=      84 | share=  0.084%
+  records=   937 | users=      84 | share=  0.084%
+  records=   639 | users=      84 | share=  0.084%
+  records=   793 | users=      84 | share=  0.084%
+  records=   524 | users=      84 | share=  0.084%
+  records=   455 | users=      84 | share=  0.084%
+  records=   587 | users=      84 | share=  0.084%
+  records=   960 | users=      84 | share=  0.084%
+  records=   381 | users=      84 | share=  0.084%
+  records=   744 | users=      84 | share=  0.084%
+  records=   757 | users=      84 | share=  0.084%
+  records=   424 | users=      84 | share=  0.084%
+  records=   529 | users=      84 | share=  0.084%
+  records=   756 | users=      84 | share=  0.084%
+  records=   442 | users=      84 | share=  0.084%
+  records=   482 | users=      83 | share=  0.083%
+  records=   861 | users=      83 | share=  0.083%
+  records=   514 | users=      83 | share=  0.083%
+  records=   989 | users=      83 | share=  0.083%
+  records=   380 | users=      83 | share=  0.083%
+  records=   905 | users=      83 | share=  0.083%
+  records=   916 | users=      83 | share=  0.083%
+  records=   485 | users=      83 | share=  0.083%
+  records=   490 | users=      83 | share=  0.083%
+  records=   655 | users=      83 | share=  0.083%
+  records=   700 | users=      83 | share=  0.083%
+  records=   658 | users=      83 | share=  0.083%
+  records=   810 | users=      83 | share=  0.083%
+  records=   519 | users=      82 | share=  0.082%
+  records=   896 | users=      82 | share=  0.082%
+  records=   629 | users=      82 | share=  0.082%
+  records=   902 | users=      82 | share=  0.082%
+  records=   647 | users=      82 | share=  0.082%
+  records=   578 | users=      82 | share=  0.082%
+  records=   592 | users=      82 | share=  0.082%
+  records=   785 | users=      82 | share=  0.082%
+  records=   926 | users=      82 | share=  0.082%
+  records=   430 | users=      82 | share=  0.082%
+  records=   447 | users=      82 | share=  0.082%
+  records=   814 | users=      82 | share=  0.082%
+  records=   510 | users=      82 | share=  0.082%
+  records=   423 | users=      82 | share=  0.082%
+  records=   552 | users=      82 | share=  0.082%
+  records=   574 | users=      82 | share=  0.082%
+  records=   748 | users=      82 | share=  0.082%
+  records=   412 | users=      81 | share=  0.081%
+  records=   410 | users=      81 | share=  0.081%
+  records=   434 | users=      81 | share=  0.081%
+  records=  1208 | users=      81 | share=  0.081%
+  records=   433 | users=      81 | share=  0.081%
+  records=   414 | users=      81 | share=  0.081%
+  records=   559 | users=      81 | share=  0.081%
+  records=   522 | users=      81 | share=  0.081%
+  records=   752 | users=      81 | share=  0.081%
+  records=   754 | users=      81 | share=  0.081%
+
+Топ-20 пользователей по числу записей:
+  customer_id=123440950706322 | records=    3318
+  customer_id=123183252667821 | records=    3259
+  customer_id=124025066258338 | records=    3237
+  customer_id=124239814623847 | records=    3202
+  customer_id=123595569526048 | records=    3152
+  customer_id=124033656194661 | records=    3148
+  customer_id=124033656191090 | records=    3130
+  customer_id=123492490314164 | records=    3102
+  customer_id=123647109137062 | records=    3101
+  customer_id=124076605867462 | records=    3055
+  customer_id=123818907829443 | records=    3046
+  customer_id=123655699072643 | records=    3045
+  customer_id=124153915277989 | records=    3027
+  customer_id=123956346780812 | records=    3007
+  customer_id=123372231230476 | records=    3004
+  customer_id=124076605866926 | records=    3003
+  customer_id=123836087698853 | records=    2997
+  customer_id=123423770834748 | records=    2983
+  customer_id=123466720511146 | records=    2970
+  customer_id=124110965601754 | records=    2969
+
+Сгенерированные файлы:
+  - pretrain_parts_hist.png
+  - pretrain_parts_distribution.csv
+  - pretrain_parts_top_users.csv
+
+[train_parts]
+------------------------------------------------------------------------------
+Источники:
+  - data/train/train_part_1.parquet
+  - data/train/train_part_2.parquet
+  - data/train/train_part_3.parquet
+Всего записей (суммарно): 85677840
+Уникальных пользователей: 100000
+Среднее: 856.7784
+Std: 426.8134
+Медиана: 832.0000
+Квантили: min=19, p1=126, p5=224, p10=312, p25=522, p50=832, p75=1146, p90=1414, p95=1593, p99=1962, max=3518
+
+Топ-100 значений 'записей на пользователя' по числу пользователей:
+  records=   669 | users=     118 | share=  0.118%
+  records=   782 | users=     109 | share=  0.109%
+  records=   923 | users=     103 | share=  0.103%
+  records=   591 | users=     103 | share=  0.103%
+  records=   965 | users=     103 | share=  0.103%
+  records=   682 | users=     103 | share=  0.103%
+  records=   817 | users=     101 | share=  0.101%
+  records=   755 | users=     101 | share=  0.101%
+  records=   597 | users=     100 | share=  0.100%
+  records=   672 | users=     100 | share=  0.100%
+  records=   460 | users=     100 | share=  0.100%
+  records=   744 | users=     100 | share=  0.100%
+  records=   846 | users=      99 | share=  0.099%
+  records=   751 | users=      98 | share=  0.098%
+  records=  1069 | users=      98 | share=  0.098%
+  records=   962 | users=      98 | share=  0.098%
+  records=   820 | users=      97 | share=  0.097%
+  records=   505 | users=      97 | share=  0.097%
+  records=   800 | users=      97 | share=  0.097%
+  records=   857 | users=      97 | share=  0.097%
+  records=  1015 | users=      97 | share=  0.097%
+  records=  1019 | users=      97 | share=  0.097%
+  records=  1027 | users=      97 | share=  0.097%
+  records=   995 | users=      97 | share=  0.097%
+  records=   727 | users=      97 | share=  0.097%
+  records=   937 | users=      97 | share=  0.097%
+  records=   592 | users=      96 | share=  0.096%
+  records=   925 | users=      96 | share=  0.096%
+  records=  1077 | users=      96 | share=  0.096%
+  records=   890 | users=      96 | share=  0.096%
+  records=   907 | users=      96 | share=  0.096%
+  records=   801 | users=      96 | share=  0.096%
+  records=   799 | users=      96 | share=  0.096%
+  records=   835 | users=      96 | share=  0.096%
+  records=   548 | users=      95 | share=  0.095%
+  records=   978 | users=      95 | share=  0.095%
+  records=   966 | users=      95 | share=  0.095%
+  records=  1097 | users=      95 | share=  0.095%
+  records=   639 | users=      95 | share=  0.095%
+  records=   707 | users=      95 | share=  0.095%
+  records=   853 | users=      95 | share=  0.095%
+  records=   530 | users=      95 | share=  0.095%
+  records=   721 | users=      95 | share=  0.095%
+  records=   989 | users=      95 | share=  0.095%
+  records=  1011 | users=      95 | share=  0.095%
+  records=   971 | users=      94 | share=  0.094%
+  records=   974 | users=      94 | share=  0.094%
+  records=  1029 | users=      94 | share=  0.094%
+  records=   840 | users=      94 | share=  0.094%
+  records=   849 | users=      94 | share=  0.094%
+  records=  1031 | users=      94 | share=  0.094%
+  records=   608 | users=      94 | share=  0.094%
+  records=   854 | users=      94 | share=  0.094%
+  records=   760 | users=      94 | share=  0.094%
+  records=   711 | users=      94 | share=  0.094%
+  records=   762 | users=      94 | share=  0.094%
+  records=   784 | users=      93 | share=  0.093%
+  records=   901 | users=      93 | share=  0.093%
+  records=  1119 | users=      93 | share=  0.093%
+  records=   894 | users=      93 | share=  0.093%
+  records=   510 | users=      93 | share=  0.093%
+  records=   970 | users=      93 | share=  0.093%
+  records=  1057 | users=      93 | share=  0.093%
+  records=   839 | users=      92 | share=  0.092%
+  records=  1081 | users=      92 | share=  0.092%
+  records=   587 | users=      92 | share=  0.092%
+  records=   932 | users=      92 | share=  0.092%
+  records=   913 | users=      92 | share=  0.092%
+  records=  1053 | users=      92 | share=  0.092%
+  records=   743 | users=      92 | share=  0.092%
+  records=   868 | users=      92 | share=  0.092%
+  records=   876 | users=      92 | share=  0.092%
+  records=   834 | users=      92 | share=  0.092%
+  records=  1071 | users=      92 | share=  0.092%
+  records=   677 | users=      92 | share=  0.092%
+  records=   950 | users=      91 | share=  0.091%
+  records=   565 | users=      91 | share=  0.091%
+  records=   984 | users=      91 | share=  0.091%
+  records=   805 | users=      91 | share=  0.091%
+  records=   752 | users=      91 | share=  0.091%
+  records=   716 | users=      91 | share=  0.091%
+  records=   492 | users=      91 | share=  0.091%
+  records=   872 | users=      91 | share=  0.091%
+  records=   873 | users=      91 | share=  0.091%
+  records=   859 | users=      91 | share=  0.091%
+  records=   822 | users=      91 | share=  0.091%
+  records=   625 | users=      91 | share=  0.091%
+  records=   945 | users=      91 | share=  0.091%
+  records=   467 | users=      90 | share=  0.090%
+  records=   633 | users=      90 | share=  0.090%
+  records=   959 | users=      90 | share=  0.090%
+  records=   729 | users=      90 | share=  0.090%
+  records=   723 | users=      90 | share=  0.090%
+  records=   695 | users=      90 | share=  0.090%
+  records=  1089 | users=      90 | share=  0.090%
+  records=   838 | users=      90 | share=  0.090%
+  records=   766 | users=      90 | share=  0.090%
+  records=   769 | users=      90 | share=  0.090%
+  records=   826 | users=      90 | share=  0.090%
+  records=  1006 | users=      90 | share=  0.090%
+
+Топ-20 пользователей по числу записей:
+  customer_id=123595569526074 | records=    3518
+  customer_id=123166072796364 | records=    3376
+  customer_id=123277741949059 | records=    3056
+  customer_id=123758778285751 | records=    3035
+  customer_id=123758778283533 | records=    3031
+  customer_id=124110965601746 | records=    3028
+  customer_id=123432360770994 | records=    3011
+  customer_id=124007886387979 | records=    2881
+  customer_id=123286331880824 | records=    2877
+  customer_id=124059425995463 | records=    2856
+  customer_id=123578389656670 | records=    2842
+  customer_id=123260562078628 | records=    2838
+  customer_id=123131713060905 | records=    2836
+  customer_id=123947756847280 | records=    2806
+  customer_id=123612749396325 | records=    2805
+  customer_id=123715828612764 | records=    2804
+  customer_id=123166072799398 | records=    2793
+  customer_id=123449540640700 | records=    2785
+  customer_id=123896217237239 | records=    2782
+  customer_id=123552619854544 | records=    2773
+
+Сгенерированные файлы:
+  - train_parts_hist.png
+  - train_parts_distribution.csv
+  - train_parts_top_users.csv
+
+[pretest]
+------------------------------------------------------------------------------
+Источники:
+  - data/test/pretest.parquet
+Всего записей (суммарно): 14202075
+Уникальных пользователей: 96953
+Среднее: 146.4841
+Std: 138.4412
+Медиана: 108.0000
+Квантили: min=1, p1=2, p5=8, p10=16, p25=44, p50=108, p75=210, p90=328, p95=410, p99=610, max=3266
+
+Топ-100 значений 'записей на пользователя' по числу пользователей:
+  records=     2 | users=     761 | share=  0.785%
+  records=     6 | users=     712 | share=  0.734%
+  records=     4 | users=     711 | share=  0.733%
+  records=     8 | users=     667 | share=  0.688%
+  records=    10 | users=     637 | share=  0.657%
+  records=     3 | users=     635 | share=  0.655%
+  records=    12 | users=     634 | share=  0.654%
+  records=     9 | users=     632 | share=  0.652%
+  records=     5 | users=     625 | share=  0.645%
+  records=    13 | users=     620 | share=  0.639%
+  records=    16 | users=     615 | share=  0.634%
+  records=     7 | users=     614 | share=  0.633%
+  records=    24 | users=     597 | share=  0.616%
+  records=    23 | users=     587 | share=  0.605%
+  records=    11 | users=     575 | share=  0.593%
+  records=    25 | users=     571 | share=  0.589%
+  records=    22 | users=     565 | share=  0.583%
+  records=    18 | users=     563 | share=  0.581%
+  records=    15 | users=     561 | share=  0.579%
+  records=    30 | users=     560 | share=  0.578%
+  records=    14 | users=     557 | share=  0.575%
+  records=    21 | users=     550 | share=  0.567%
+  records=    17 | users=     539 | share=  0.556%
+  records=     1 | users=     538 | share=  0.555%
+  records=    20 | users=     537 | share=  0.554%
+  records=    26 | users=     535 | share=  0.552%
+  records=    31 | users=     534 | share=  0.551%
+  records=    29 | users=     522 | share=  0.538%
+  records=    28 | users=     520 | share=  0.536%
+  records=    27 | users=     519 | share=  0.535%
+  records=    19 | users=     511 | share=  0.527%
+  records=    35 | users=     510 | share=  0.526%
+  records=    32 | users=     508 | share=  0.524%
+  records=    34 | users=     504 | share=  0.520%
+  records=    33 | users=     503 | share=  0.519%
+  records=    37 | users=     503 | share=  0.519%
+  records=    40 | users=     502 | share=  0.518%
+  records=    39 | users=     494 | share=  0.510%
+  records=    38 | users=     481 | share=  0.496%
+  records=    36 | users=     473 | share=  0.488%
+  records=    43 | users=     468 | share=  0.483%
+  records=    49 | users=     468 | share=  0.483%
+  records=    55 | users=     459 | share=  0.473%
+  records=    54 | users=     458 | share=  0.472%
+  records=    42 | users=     457 | share=  0.471%
+  records=    41 | users=     457 | share=  0.471%
+  records=    45 | users=     456 | share=  0.470%
+  records=    51 | users=     452 | share=  0.466%
+  records=    52 | users=     450 | share=  0.464%
+  records=    44 | users=     444 | share=  0.458%
+  records=    47 | users=     442 | share=  0.456%
+  records=    50 | users=     442 | share=  0.456%
+  records=    57 | users=     441 | share=  0.455%
+  records=    48 | users=     440 | share=  0.454%
+  records=    53 | users=     437 | share=  0.451%
+  records=    46 | users=     434 | share=  0.448%
+  records=    56 | users=     430 | share=  0.444%
+  records=    61 | users=     425 | share=  0.438%
+  records=    68 | users=     425 | share=  0.438%
+  records=    58 | users=     424 | share=  0.437%
+  records=    64 | users=     416 | share=  0.429%
+  records=    60 | users=     415 | share=  0.428%
+  records=    66 | users=     414 | share=  0.427%
+  records=    62 | users=     409 | share=  0.422%
+  records=    71 | users=     405 | share=  0.418%
+  records=    69 | users=     404 | share=  0.417%
+  records=    59 | users=     403 | share=  0.416%
+  records=    77 | users=     395 | share=  0.407%
+  records=    74 | users=     394 | share=  0.406%
+  records=    67 | users=     394 | share=  0.406%
+  records=    72 | users=     393 | share=  0.405%
+  records=    63 | users=     392 | share=  0.404%
+  records=    65 | users=     391 | share=  0.403%
+  records=    80 | users=     390 | share=  0.402%
+  records=    83 | users=     385 | share=  0.397%
+  records=    79 | users=     377 | share=  0.389%
+  records=    75 | users=     371 | share=  0.383%
+  records=    82 | users=     364 | share=  0.375%
+  records=    70 | users=     362 | share=  0.373%
+  records=    93 | users=     360 | share=  0.371%
+  records=    76 | users=     357 | share=  0.368%
+  records=    84 | users=     356 | share=  0.367%
+  records=    91 | users=     355 | share=  0.366%
+  records=    88 | users=     349 | share=  0.360%
+  records=    90 | users=     343 | share=  0.354%
+  records=    78 | users=     342 | share=  0.353%
+  records=    86 | users=     340 | share=  0.351%
+  records=    94 | users=     338 | share=  0.349%
+  records=   107 | users=     338 | share=  0.349%
+  records=    92 | users=     338 | share=  0.349%
+  records=    95 | users=     336 | share=  0.347%
+  records=   101 | users=     335 | share=  0.346%
+  records=   100 | users=     335 | share=  0.346%
+  records=   105 | users=     335 | share=  0.346%
+  records=    87 | users=     334 | share=  0.344%
+  records=    73 | users=     333 | share=  0.343%
+  records=   102 | users=     332 | share=  0.342%
+  records=   122 | users=     332 | share=  0.342%
+  records=    98 | users=     330 | share=  0.340%
+  records=    99 | users=     329 | share=  0.339%
+
+Топ-20 пользователей по числу записей:
+  customer_id=123707238676314 | records=    3266
+  customer_id=123810317892055 | records=    2654
+  customer_id=124076605864801 | records=    2072
+  customer_id=123544029920420 | records=    2007
+  customer_id=123140302992338 | records=    1987
+  customer_id=123861857501600 | records=    1952
+  customer_id=123432360768548 | records=    1696
+  customer_id=123784548090226 | records=    1692
+  customer_id=123595569525752 | records=    1527
+  customer_id=123707238676309 | records=    1478
+  customer_id=123337871489024 | records=    1456
+  customer_id=123827497762254 | records=    1436
+  customer_id=124128145472204 | records=    1436
+  customer_id=124025066258238 | records=    1415
+  customer_id=123836087696962 | records=    1404
+  customer_id=123707238676855 | records=    1384
+  customer_id=123432360771834 | records=    1370
+  customer_id=124042246125915 | records=    1367
+  customer_id=124033656191320 | records=    1363
+  customer_id=124050836060884 | records=    1362
+
+Сгенерированные файлы:
+  - pretest_hist.png
+  - pretest_distribution.csv
+  - pretest_top_users.csv
+
+[test]
+------------------------------------------------------------------------------
+Источники:
+  - data/test/test.parquet
+Всего записей (суммарно): 633683
+Уникальных пользователей: 94241
+Среднее: 6.7241
+Std: 8.2222
+Медиана: 4.0000
+Квантили: min=1, p1=1, p5=1, p10=1, p25=2, p50=4, p75=8, p90=14, p95=20, p99=40, max=221
+
+Топ-100 значений 'записей на пользователя' по числу пользователей:
+  records=     2 | users=   14833 | share= 15.739%
+  records=     1 | users=   13576 | share= 14.406%
+  records=     3 | users=   10789 | share= 11.448%
+  records=     4 | users=   10216 | share= 10.840%
+  records=     5 | users=    7060 | share=  7.491%
+  records=     6 | users=    6496 | share=  6.893%
+  records=     7 | users=    4865 | share=  5.162%
+  records=     8 | users=    4254 | share=  4.514%
+  records=     9 | users=    3202 | share=  3.398%
+  records=    10 | users=    2737 | share=  2.904%
+  records=    11 | users=    2217 | share=  2.352%
+  records=    12 | users=    1908 | share=  2.025%
+  records=    13 | users=    1528 | share=  1.621%
+  records=    14 | users=    1315 | share=  1.395%
+  records=    15 | users=    1104 | share=  1.171%
+  records=    16 | users=     978 | share=  1.038%
+  records=    17 | users=     777 | share=  0.824%
+  records=    18 | users=     696 | share=  0.739%
+  records=    19 | users=     641 | share=  0.680%
+  records=    20 | users=     510 | share=  0.541%
+  records=    21 | users=     453 | share=  0.481%
+  records=    23 | users=     366 | share=  0.388%
+  records=    22 | users=     354 | share=  0.376%
+  records=    24 | users=     275 | share=  0.292%
+  records=    25 | users=     241 | share=  0.256%
+  records=    26 | users=     241 | share=  0.256%
+  records=    27 | users=     205 | share=  0.218%
+  records=    28 | users=     205 | share=  0.218%
+  records=    29 | users=     163 | share=  0.173%
+  records=    30 | users=     156 | share=  0.166%
+  records=    31 | users=     135 | share=  0.143%
+  records=    34 | users=     127 | share=  0.135%
+  records=    32 | users=     115 | share=  0.122%
+  records=    33 | users=     115 | share=  0.122%
+  records=    35 | users=      95 | share=  0.101%
+  records=    36 | users=      87 | share=  0.092%
+  records=    38 | users=      82 | share=  0.087%
+  records=    39 | users=      78 | share=  0.083%
+  records=    37 | users=      73 | share=  0.077%
+  records=    40 | users=      65 | share=  0.069%
+  records=    42 | users=      56 | share=  0.059%
+  records=    41 | users=      55 | share=  0.058%
+  records=    46 | users=      51 | share=  0.054%
+  records=    43 | users=      45 | share=  0.048%
+  records=    45 | users=      41 | share=  0.044%
+  records=    44 | users=      40 | share=  0.042%
+  records=    47 | users=      36 | share=  0.038%
+  records=    52 | users=      33 | share=  0.035%
+  records=    51 | users=      33 | share=  0.035%
+  records=    50 | users=      31 | share=  0.033%
+  records=    54 | users=      31 | share=  0.033%
+  records=    49 | users=      28 | share=  0.030%
+  records=    48 | users=      26 | share=  0.028%
+  records=    55 | users=      24 | share=  0.025%
+  records=    53 | users=      23 | share=  0.024%
+  records=    59 | users=      20 | share=  0.021%
+  records=    58 | users=      17 | share=  0.018%
+  records=    56 | users=      15 | share=  0.016%
+  records=    62 | users=      14 | share=  0.015%
+  records=    57 | users=      13 | share=  0.014%
+  records=    60 | users=      13 | share=  0.014%
+  records=    63 | users=      13 | share=  0.014%
+  records=    71 | users=      13 | share=  0.014%
+  records=    61 | users=      12 | share=  0.013%
+  records=    68 | users=      12 | share=  0.013%
+  records=    65 | users=      12 | share=  0.013%
+  records=    67 | users=      10 | share=  0.011%
+  records=    64 | users=       9 | share=  0.010%
+  records=    66 | users=       9 | share=  0.010%
+  records=    70 | users=       8 | share=  0.008%
+  records=    72 | users=       8 | share=  0.008%
+  records=    73 | users=       8 | share=  0.008%
+  records=    79 | users=       8 | share=  0.008%
+  records=    80 | users=       8 | share=  0.008%
+  records=    82 | users=       7 | share=  0.007%
+  records=    69 | users=       6 | share=  0.006%
+  records=    94 | users=       6 | share=  0.006%
+  records=    96 | users=       5 | share=  0.005%
+  records=    76 | users=       5 | share=  0.005%
+  records=    75 | users=       4 | share=  0.004%
+  records=    83 | users=       4 | share=  0.004%
+  records=    77 | users=       4 | share=  0.004%
+  records=    74 | users=       4 | share=  0.004%
+  records=    81 | users=       4 | share=  0.004%
+  records=    87 | users=       4 | share=  0.004%
+  records=    97 | users=       4 | share=  0.004%
+  records=    90 | users=       3 | share=  0.003%
+  records=    86 | users=       3 | share=  0.003%
+  records=   111 | users=       3 | share=  0.003%
+  records=   113 | users=       3 | share=  0.003%
+  records=   114 | users=       3 | share=  0.003%
+  records=   108 | users=       3 | share=  0.003%
+  records=   104 | users=       3 | share=  0.003%
+  records=   103 | users=       3 | share=  0.003%
+  records=   102 | users=       3 | share=  0.003%
+  records=    99 | users=       3 | share=  0.003%
+  records=   117 | users=       2 | share=  0.002%
+  records=    89 | users=       2 | share=  0.002%
+  records=    92 | users=       2 | share=  0.002%
+  records=    93 | users=       2 | share=  0.002%
+
+Топ-20 пользователей по числу записей:
+  customer_id=124050836061334 | records=     221
+  customer_id=123483900376099 | records=     197
+  customer_id=124033656190640 | records=     181
+  customer_id=124050836060884 | records=     175
+  customer_id=123251972146418 | records=     169
+  customer_id=123234792273320 | records=     168
+  customer_id=123655699070449 | records=     158
+  customer_id=124222634754302 | records=     152
+  customer_id=123655699072495 | records=     140
+  customer_id=124042246124624 | records=     139
+  customer_id=123209022473012 | records=     138
+  customer_id=123501080246138 | records=     135
+  customer_id=123956346782445 | records=     135
+  customer_id=123561209790094 | records=     127
+  customer_id=123312101685376 | records=     124
+  customer_id=123363641292849 | records=     124
+  customer_id=123638519202526 | records=     123
+  customer_id=124205454882508 | records=     123
+  customer_id=123346461426110 | records=     121
+  customer_id=123947756847007 | records=     121
+
+Сгенерированные файлы:
+  - test_hist.png
+  - test_distribution.csv
+  - test_top_users.csv
+
+[pretrain_part_1]
+------------------------------------------------------------------------------
+Источники:
+  - data/train/pretrain_part_1.parquet
+Всего записей (суммарно): 30329960
+Уникальных пользователей: 33333
+Среднее: 909.9079
+Std: 482.7623
+Медиана: 858.0000
+Квантили: min=24, p1=132, p5=226, p10=307, p25=520, p50=858, p75=1253, p90=1577, p95=1743, p99=2122, max=3318
+
+Топ-100 значений 'записей на пользователя' по числу пользователей:
+  records=  1017 | users=      40 | share=  0.120%
+  records=  1082 | users=      39 | share=  0.117%
+  records=  1041 | users=      38 | share=  0.114%
+  records=   594 | users=      37 | share=  0.111%
+  records=   412 | users=      37 | share=  0.111%
+  records=   853 | users=      36 | share=  0.108%
+  records=   960 | users=      36 | share=  0.108%
+  records=   989 | users=      36 | share=  0.108%
+  records=   541 | users=      36 | share=  0.108%
+  records=   781 | users=      35 | share=  0.105%
+  records=   738 | users=      35 | share=  0.105%
+  records=   800 | users=      35 | share=  0.105%
+  records=   374 | users=      35 | share=  0.105%
+  records=   776 | users=      35 | share=  0.105%
+  records=   902 | users=      34 | share=  0.102%
+  records=   708 | users=      34 | share=  0.102%
+  records=   648 | users=      34 | share=  0.102%
+  records=   662 | users=      34 | share=  0.102%
+  records=   549 | users=      34 | share=  0.102%
+  records=   518 | users=      34 | share=  0.102%
+  records=   485 | users=      34 | share=  0.102%
+  records=   462 | users=      34 | share=  0.102%
+  records=   785 | users=      33 | share=  0.099%
+  records=   683 | users=      33 | share=  0.099%
+  records=   626 | users=      33 | share=  0.099%
+  records=   609 | users=      33 | share=  0.099%
+  records=   483 | users=      33 | share=  0.099%
+  records=   338 | users=      33 | share=  0.099%
+  records=   639 | users=      33 | share=  0.099%
+  records=   583 | users=      33 | share=  0.099%
+  records=   593 | users=      33 | share=  0.099%
+  records=   382 | users=      33 | share=  0.099%
+  records=   587 | users=      32 | share=  0.096%
+  records=   578 | users=      32 | share=  0.096%
+  records=   592 | users=      32 | share=  0.096%
+  records=   605 | users=      32 | share=  0.096%
+  records=   680 | users=      32 | share=  0.096%
+  records=   889 | users=      32 | share=  0.096%
+  records=   342 | users=      32 | share=  0.096%
+  records=   788 | users=      32 | share=  0.096%
+  records=   455 | users=      32 | share=  0.096%
+  records=   411 | users=      32 | share=  0.096%
+  records=   663 | users=      32 | share=  0.096%
+  records=   627 | users=      32 | share=  0.096%
+  records=   332 | users=      32 | share=  0.096%
+  records=   318 | users=      32 | share=  0.096%
+  records=   689 | users=      31 | share=  0.093%
+  records=   699 | users=      31 | share=  0.093%
+  records=   803 | users=      31 | share=  0.093%
+  records=   760 | users=      31 | share=  0.093%
+  records=   468 | users=      31 | share=  0.093%
+  records=   844 | users=      31 | share=  0.093%
+  records=   836 | users=      31 | share=  0.093%
+  records=   745 | users=      31 | share=  0.093%
+  records=   757 | users=      31 | share=  0.093%
+  records=   504 | users=      31 | share=  0.093%
+  records=   991 | users=      31 | share=  0.093%
+  records=   934 | users=      31 | share=  0.093%
+  records=   365 | users=      31 | share=  0.093%
+  records=   460 | users=      31 | share=  0.093%
+  records=  1025 | users=      31 | share=  0.093%
+  records=  1227 | users=      31 | share=  0.093%
+  records=   346 | users=      31 | share=  0.093%
+  records=   393 | users=      31 | share=  0.093%
+  records=   597 | users=      31 | share=  0.093%
+  records=  1145 | users=      31 | share=  0.093%
+  records=   422 | users=      31 | share=  0.093%
+  records=   652 | users=      31 | share=  0.093%
+  records=   612 | users=      31 | share=  0.093%
+  records=   616 | users=      31 | share=  0.093%
+  records=   447 | users=      31 | share=  0.093%
+  records=  1143 | users=      31 | share=  0.093%
+  records=   741 | users=      31 | share=  0.093%
+  records=   534 | users=      31 | share=  0.093%
+  records=   719 | users=      31 | share=  0.093%
+  records=   782 | users=      31 | share=  0.093%
+  records=   559 | users=      30 | share=  0.090%
+  records=   723 | users=      30 | share=  0.090%
+  records=   674 | users=      30 | share=  0.090%
+  records=   695 | users=      30 | share=  0.090%
+  records=   402 | users=      30 | share=  0.090%
+  records=   381 | users=      30 | share=  0.090%
+  records=   649 | users=      30 | share=  0.090%
+  records=   293 | users=      30 | share=  0.090%
+  records=   515 | users=      30 | share=  0.090%
+  records=   267 | users=      30 | share=  0.090%
+  records=   635 | users=      30 | share=  0.090%
+  records=   606 | users=      30 | share=  0.090%
+  records=   535 | users=      30 | share=  0.090%
+  records=   574 | users=      30 | share=  0.090%
+  records=   432 | users=      30 | share=  0.090%
+  records=   380 | users=      30 | share=  0.090%
+  records=  1100 | users=      30 | share=  0.090%
+  records=  1087 | users=      30 | share=  0.090%
+  records=   552 | users=      30 | share=  0.090%
+  records=  1125 | users=      30 | share=  0.090%
+  records=   655 | users=      30 | share=  0.090%
+  records=   388 | users=      30 | share=  0.090%
+  records=   459 | users=      30 | share=  0.090%
+  records=   805 | users=      30 | share=  0.090%
+
+Топ-20 пользователей по числу записей:
+  customer_id=123440950706322 | records=    3318
+  customer_id=123183252667821 | records=    3259
+  customer_id=123492490314164 | records=    3102
+  customer_id=123372231230476 | records=    3004
+  customer_id=123423770834748 | records=    2983
+  customer_id=123466720511146 | records=    2970
+  customer_id=123277741950218 | records=    2929
+  customer_id=123423770837463 | records=    2923
+  customer_id=123440950704127 | records=    2919
+  customer_id=123355051359961 | records=    2917
+  customer_id=123415180902995 | records=    2908
+  customer_id=123209022471051 | records=    2890
+  customer_id=123389411099843 | records=    2877
+  customer_id=123166072796385 | records=    2872
+  customer_id=123440950703943 | records=    2871
+  customer_id=123200432535191 | records=    2861
+  customer_id=123148892930057 | records=    2833
+  customer_id=123380821165244 | records=    2830
+  customer_id=123380821164588 | records=    2819
+  customer_id=123398001031114 | records=    2812
+
+Сгенерированные файлы:
+  - pretrain_part_1_hist.png
+  - pretrain_part_1_distribution.csv
+  - pretrain_part_1_top_users.csv
+
+[pretrain_part_2]
+------------------------------------------------------------------------------
+Источники:
+  - data/train/pretrain_part_2.parquet
+Всего записей (суммарно): 30237860
+Уникальных пользователей: 33333
+Среднее: 907.1449
+Std: 480.2240
+Медиана: 860.0000
+Квантили: min=38, p1=130, p5=221, p10=306, p25=518, p50=860, p75=1245, p90=1562, p95=1741, p99=2104, max=3152
+
+Топ-100 значений 'записей на пользователя' по числу пользователей:
+  records=   765 | users=      41 | share=  0.123%
+  records=   494 | users=      40 | share=  0.120%
+  records=   914 | users=      40 | share=  0.120%
+  records=   603 | users=      39 | share=  0.117%
+  records=   615 | users=      38 | share=  0.114%
+  records=   518 | users=      37 | share=  0.111%
+  records=   625 | users=      36 | share=  0.108%
+  records=   591 | users=      36 | share=  0.108%
+  records=   557 | users=      36 | share=  0.108%
+  records=   539 | users=      36 | share=  0.108%
+  records=   493 | users=      36 | share=  0.108%
+  records=   861 | users=      36 | share=  0.108%
+  records=   626 | users=      35 | share=  0.105%
+  records=   601 | users=      35 | share=  0.105%
+  records=  1133 | users=      35 | share=  0.105%
+  records=   826 | users=      35 | share=  0.105%
+  records=   788 | users=      35 | share=  0.105%
+  records=   483 | users=      34 | share=  0.102%
+  records=  1124 | users=      34 | share=  0.102%
+  records=   654 | users=      34 | share=  0.102%
+  records=   912 | users=      34 | share=  0.102%
+  records=   313 | users=      34 | share=  0.102%
+  records=  1198 | users=      34 | share=  0.102%
+  records=   653 | users=      34 | share=  0.102%
+  records=  1034 | users=      34 | share=  0.102%
+  records=   271 | users=      34 | share=  0.102%
+  records=   957 | users=      34 | share=  0.102%
+  records=   856 | users=      33 | share=  0.099%
+  records=   814 | users=      33 | share=  0.099%
+  records=   877 | users=      33 | share=  0.099%
+  records=   419 | users=      33 | share=  0.099%
+  records=  1144 | users=      33 | share=  0.099%
+  records=   938 | users=      33 | share=  0.099%
+  records=   746 | users=      33 | share=  0.099%
+  records=   343 | users=      33 | share=  0.099%
+  records=   955 | users=      33 | share=  0.099%
+  records=   394 | users=      33 | share=  0.099%
+  records=   392 | users=      33 | share=  0.099%
+  records=   482 | users=      32 | share=  0.096%
+  records=   454 | users=      32 | share=  0.096%
+  records=   564 | users=      32 | share=  0.096%
+  records=   524 | users=      32 | share=  0.096%
+  records=  1119 | users=      32 | share=  0.096%
+  records=  1207 | users=      32 | share=  0.096%
+  records=   622 | users=      32 | share=  0.096%
+  records=   949 | users=      32 | share=  0.096%
+  records=   779 | users=      32 | share=  0.096%
+  records=   776 | users=      32 | share=  0.096%
+  records=   328 | users=      32 | share=  0.096%
+  records=   958 | users=      32 | share=  0.096%
+  records=   951 | users=      32 | share=  0.096%
+  records=   357 | users=      32 | share=  0.096%
+  records=   519 | users=      32 | share=  0.096%
+  records=   645 | users=      32 | share=  0.096%
+  records=   613 | users=      32 | share=  0.096%
+  records=   637 | users=      32 | share=  0.096%
+  records=   497 | users=      31 | share=  0.093%
+  records=   879 | users=      31 | share=  0.093%
+  records=  1106 | users=      31 | share=  0.093%
+  records=   844 | users=      31 | share=  0.093%
+  records=   674 | users=      31 | share=  0.093%
+  records=   616 | users=      31 | share=  0.093%
+  records=   655 | users=      31 | share=  0.093%
+  records=   829 | users=      31 | share=  0.093%
+  records=   739 | users=      31 | share=  0.093%
+  records=   824 | users=      31 | share=  0.093%
+  records=   740 | users=      31 | share=  0.093%
+  records=   819 | users=      31 | share=  0.093%
+  records=   735 | users=      31 | share=  0.093%
+  records=   849 | users=      31 | share=  0.093%
+  records=   797 | users=      31 | share=  0.093%
+  records=   811 | users=      31 | share=  0.093%
+  records=   363 | users=      31 | share=  0.093%
+  records=   785 | users=      31 | share=  0.093%
+  records=   247 | users=      31 | share=  0.093%
+  records=   916 | users=      31 | share=  0.093%
+  records=   781 | users=      31 | share=  0.093%
+  records=   724 | users=      31 | share=  0.093%
+  records=   872 | users=      31 | share=  0.093%
+  records=   857 | users=      31 | share=  0.093%
+  records=   628 | users=      31 | share=  0.093%
+  records=   513 | users=      30 | share=  0.090%
+  records=   437 | users=      30 | share=  0.090%
+  records=   442 | users=      30 | share=  0.090%
+  records=   426 | users=      30 | share=  0.090%
+  records=   607 | users=      30 | share=  0.090%
+  records=   435 | users=      30 | share=  0.090%
+  records=  1145 | users=      30 | share=  0.090%
+  records=   424 | users=      30 | share=  0.090%
+  records=   771 | users=      30 | share=  0.090%
+  records=   812 | users=      30 | share=  0.090%
+  records=   648 | users=      30 | share=  0.090%
+  records=   633 | users=      30 | share=  0.090%
+  records=   837 | users=      30 | share=  0.090%
+  records=   672 | users=      30 | share=  0.090%
+  records=   744 | users=      30 | share=  0.090%
+  records=   693 | users=      30 | share=  0.090%
+  records=  1027 | users=      30 | share=  0.090%
+  records=  1044 | users=      30 | share=  0.090%
+  records=   380 | users=      30 | share=  0.090%
+
+Топ-20 пользователей по числу записей:
+  customer_id=123595569526048 | records=    3152
+  customer_id=123647109137062 | records=    3101
+  customer_id=123818907829443 | records=    3046
+  customer_id=123655699072643 | records=    3045
+  customer_id=123836087698853 | records=    2997
+  customer_id=123836087694711 | records=    2967
+  customer_id=123561209788112 | records=    2915
+  customer_id=123544029922925 | records=    2912
+  customer_id=123526850053308 | records=    2884
+  customer_id=123526850049252 | records=    2877
+  customer_id=123621339333531 | records=    2864
+  customer_id=123827497764320 | records=    2844
+  customer_id=123698648742984 | records=    2840
+  customer_id=123715828614562 | records=    2829
+  customer_id=123870447436929 | records=    2820
+  customer_id=123724418547966 | records=    2798
+  customer_id=123870447435270 | records=    2795
+  customer_id=123784548091341 | records=    2752
+  customer_id=123698648744868 | records=    2750
+  customer_id=123827497760892 | records=    2738
+
+Сгенерированные файлы:
+  - pretrain_part_2_hist.png
+  - pretrain_part_2_distribution.csv
+  - pretrain_part_2_top_users.csv
+
+[pretrain_part_3]
+------------------------------------------------------------------------------
+Источники:
+  - data/train/pretrain_part_3.parquet
+Всего записей (суммарно): 30372137
+Уникальных пользователей: 33334
+Среднее: 911.1459
+Std: 483.5364
+Медиана: 862.0000
+Квантили: min=27, p1=128, p5=221, p10=305, p25=521, p50=862, p75=1255, p90=1576, p95=1750, p99=2098, max=3237
+
+Топ-100 значений 'записей на пользователя' по числу пользователей:
+  records=   642 | users=      44 | share=  0.132%
+  records=   643 | users=      40 | share=  0.120%
+  records=   478 | users=      40 | share=  0.120%
+  records=   604 | users=      37 | share=  0.111%
+  records=   754 | users=      37 | share=  0.111%
+  records=   332 | users=      37 | share=  0.111%
+  records=   414 | users=      36 | share=  0.108%
+  records=   541 | users=      36 | share=  0.108%
+  records=   627 | users=      36 | share=  0.108%
+  records=   483 | users=      36 | share=  0.108%
+  records=   833 | users=      35 | share=  0.105%
+  records=   836 | users=      35 | share=  0.105%
+  records=   394 | users=      34 | share=  0.102%
+  records=   748 | users=      34 | share=  0.102%
+  records=   570 | users=      34 | share=  0.102%
+  records=   927 | users=      34 | share=  0.102%
+  records=   487 | users=      34 | share=  0.102%
+  records=   620 | users=      34 | share=  0.102%
+  records=   667 | users=      33 | share=  0.099%
+  records=   901 | users=      33 | share=  0.099%
+  records=   755 | users=      33 | share=  0.099%
+  records=   436 | users=      33 | share=  0.099%
+  records=   511 | users=      33 | share=  0.099%
+  records=   629 | users=      33 | share=  0.099%
+  records=   544 | users=      33 | share=  0.099%
+  records=   822 | users=      33 | share=  0.099%
+  records=   807 | users=      33 | share=  0.099%
+  records=   634 | users=      33 | share=  0.099%
+  records=   759 | users=      32 | share=  0.096%
+  records=   416 | users=      32 | share=  0.096%
+  records=   390 | users=      32 | share=  0.096%
+  records=   381 | users=      32 | share=  0.096%
+  records=   592 | users=      32 | share=  0.096%
+  records=   684 | users=      32 | share=  0.096%
+  records=   520 | users=      32 | share=  0.096%
+  records=   442 | users=      32 | share=  0.096%
+  records=   609 | users=      32 | share=  0.096%
+  records=   808 | users=      32 | share=  0.096%
+  records=   777 | users=      32 | share=  0.096%
+  records=   661 | users=      32 | share=  0.096%
+  records=   576 | users=      32 | share=  0.096%
+  records=   464 | users=      31 | share=  0.093%
+  records=   709 | users=      31 | share=  0.093%
+  records=   685 | users=      31 | share=  0.093%
+  records=   510 | users=      31 | share=  0.093%
+  records=   992 | users=      31 | share=  0.093%
+  records=  1208 | users=      31 | share=  0.093%
+  records=   656 | users=      31 | share=  0.093%
+  records=   876 | users=      31 | share=  0.093%
+  records=   810 | users=      31 | share=  0.093%
+  records=  1080 | users=      31 | share=  0.093%
+  records=   864 | users=      31 | share=  0.093%
+  records=   320 | users=      31 | share=  0.093%
+  records=   529 | users=      31 | share=  0.093%
+  records=   435 | users=      31 | share=  0.093%
+  records=   946 | users=      31 | share=  0.093%
+  records=   756 | users=      31 | share=  0.093%
+  records=   575 | users=      31 | share=  0.093%
+  records=   569 | users=      31 | share=  0.093%
+  records=   905 | users=      31 | share=  0.093%
+  records=  1323 | users=      31 | share=  0.093%
+  records=   664 | users=      31 | share=  0.093%
+  records=   532 | users=      31 | share=  0.093%
+  records=  1172 | users=      31 | share=  0.093%
+  records=   608 | users=      30 | share=  0.090%
+  records=   702 | users=      30 | share=  0.090%
+  records=   410 | users=      30 | share=  0.090%
+  records=   424 | users=      30 | share=  0.090%
+  records=   669 | users=      30 | share=  0.090%
+  records=   272 | users=      30 | share=  0.090%
+  records=   830 | users=      30 | share=  0.090%
+  records=   890 | users=      30 | share=  0.090%
+  records=  1057 | users=      30 | share=  0.090%
+  records=  1076 | users=      30 | share=  0.090%
+  records=   844 | users=      30 | share=  0.090%
+  records=   805 | users=      30 | share=  0.090%
+  records=  1099 | users=      30 | share=  0.090%
+  records=   828 | users=      30 | share=  0.090%
+  records=   872 | users=      30 | share=  0.090%
+  records=   543 | users=      30 | share=  0.090%
+  records=   719 | users=      30 | share=  0.090%
+  records=   437 | users=      30 | share=  0.090%
+  records=   514 | users=      30 | share=  0.090%
+  records=   657 | users=      30 | share=  0.090%
+  records=   605 | users=      30 | share=  0.090%
+  records=   406 | users=      30 | share=  0.090%
+  records=   953 | users=      30 | share=  0.090%
+  records=   463 | users=      30 | share=  0.090%
+  records=   658 | users=      29 | share=  0.087%
+  records=   765 | users=      29 | share=  0.087%
+  records=   914 | users=      29 | share=  0.087%
+  records=   757 | users=      29 | share=  0.087%
+  records=   663 | users=      29 | share=  0.087%
+  records=   791 | users=      29 | share=  0.087%
+  records=   354 | users=      29 | share=  0.087%
+  records=   793 | users=      29 | share=  0.087%
+  records=  1287 | users=      29 | share=  0.087%
+  records=   333 | users=      29 | share=  0.087%
+  records=   878 | users=      29 | share=  0.087%
+  records=   894 | users=      29 | share=  0.087%
+
+Топ-20 пользователей по числу записей:
+  customer_id=124025066258338 | records=    3237
+  customer_id=124239814623847 | records=    3202
+  customer_id=124033656194661 | records=    3148
+  customer_id=124033656191090 | records=    3130
+  customer_id=124076605867462 | records=    3055
+  customer_id=124153915277989 | records=    3027
+  customer_id=123956346780812 | records=    3007
+  customer_id=124076605866926 | records=    3003
+  customer_id=124110965601754 | records=    2969
+  customer_id=124093785735794 | records=    2940
+  customer_id=123999296454245 | records=    2932
+  customer_id=124222634751660 | records=    2862
+  customer_id=124042246128807 | records=    2817
+  customer_id=123939166910697 | records=    2815
+  customer_id=124145325340270 | records=    2806
+  customer_id=124128145474269 | records=    2790
+  customer_id=123999296453687 | records=    2786
+  customer_id=123982116586795 | records=    2766
+  customer_id=124205454885315 | records=    2766
+  customer_id=124059425997270 | records=    2757
+
+Сгенерированные файлы:
+  - pretrain_part_3_hist.png
+  - pretrain_part_3_distribution.csv
+  - pretrain_part_3_top_users.csv
+
+[train_part_1]
+------------------------------------------------------------------------------
+Источники:
+  - data/train/train_part_1.parquet
+Всего записей (суммарно): 28618594
+Уникальных пользователей: 33333
+Среднее: 858.5664
+Std: 427.6851
+Медиана: 834.0000
+Квантили: min=45, p1=129, p5=226, p10=315, p25=521, p50=834, p75=1148, p90=1417, p95=1595, p99=1966, max=3376
+
+Топ-100 значений 'записей на пользователя' по числу пользователей:
+  records=   801 | users=      45 | share=  0.135%
+  records=   892 | users=      42 | share=  0.126%
+  records=   817 | users=      42 | share=  0.126%
+  records=   626 | users=      42 | share=  0.126%
+  records=   760 | users=      42 | share=  0.126%
+  records=   866 | users=      40 | share=  0.120%
+  records=   853 | users=      40 | share=  0.120%
+  records=   591 | users=      39 | share=  0.117%
+  records=  1027 | users=      39 | share=  0.117%
+  records=  1019 | users=      39 | share=  0.117%
+  records=   597 | users=      38 | share=  0.114%
+  records=   997 | users=      38 | share=  0.114%
+  records=   970 | users=      38 | share=  0.114%
+  records=   945 | users=      38 | share=  0.114%
+  records=   808 | users=      38 | share=  0.114%
+  records=  1097 | users=      38 | share=  0.114%
+  records=   371 | users=      37 | share=  0.111%
+  records=   874 | users=      37 | share=  0.111%
+  records=   583 | users=      37 | share=  0.111%
+  records=   965 | users=      37 | share=  0.111%
+  records=   513 | users=      37 | share=  0.111%
+  records=   596 | users=      36 | share=  0.108%
+  records=   491 | users=      36 | share=  0.108%
+  records=   764 | users=      36 | share=  0.108%
+  records=   340 | users=      36 | share=  0.108%
+  records=   603 | users=      36 | share=  0.108%
+  records=   923 | users=      36 | share=  0.108%
+  records=   712 | users=      36 | share=  0.108%
+  records=   658 | users=      36 | share=  0.108%
+  records=   782 | users=      36 | share=  0.108%
+  records=  1119 | users=      35 | share=  0.105%
+  records=   565 | users=      35 | share=  0.105%
+  records=   505 | users=      35 | share=  0.105%
+  records=  1016 | users=      35 | share=  0.105%
+  records=   859 | users=      35 | share=  0.105%
+  records=   740 | users=      35 | share=  0.105%
+  records=  1099 | users=      35 | share=  0.105%
+  records=   822 | users=      35 | share=  0.105%
+  records=  1147 | users=      35 | share=  0.105%
+  records=   830 | users=      35 | share=  0.105%
+  records=   548 | users=      35 | share=  0.105%
+  records=   639 | users=      35 | share=  0.105%
+  records=   852 | users=      35 | share=  0.105%
+  records=   707 | users=      35 | share=  0.105%
+  records=   846 | users=      35 | share=  0.105%
+  records=   862 | users=      35 | share=  0.105%
+  records=  1057 | users=      35 | share=  0.105%
+  records=   721 | users=      35 | share=  0.105%
+  records=   460 | users=      35 | share=  0.105%
+  records=   905 | users=      34 | share=  0.102%
+  records=   614 | users=      34 | share=  0.102%
+  records=   669 | users=      34 | share=  0.102%
+  records=  1015 | users=      34 | share=  0.102%
+  records=   711 | users=      34 | share=  0.102%
+  records=   492 | users=      34 | share=  0.102%
+  records=  1037 | users=      34 | share=  0.102%
+  records=   777 | users=      34 | share=  0.102%
+  records=   771 | users=      34 | share=  0.102%
+  records=   758 | users=      34 | share=  0.102%
+  records=   552 | users=      34 | share=  0.102%
+  records=   917 | users=      34 | share=  0.102%
+  records=   411 | users=      34 | share=  0.102%
+  records=   542 | users=      34 | share=  0.102%
+  records=  1135 | users=      34 | share=  0.102%
+  records=  1032 | users=      34 | share=  0.102%
+  records=   485 | users=      34 | share=  0.102%
+  records=   773 | users=      33 | share=  0.099%
+  records=   872 | users=      33 | share=  0.099%
+  records=   768 | users=      33 | share=  0.099%
+  records=   783 | users=      33 | share=  0.099%
+  records=  1069 | users=      33 | share=  0.099%
+  records=   672 | users=      33 | share=  0.099%
+  records=   499 | users=      33 | share=  0.099%
+  records=   484 | users=      33 | share=  0.099%
+  records=   508 | users=      33 | share=  0.099%
+  records=   530 | users=      33 | share=  0.099%
+  records=   694 | users=      33 | share=  0.099%
+  records=  1063 | users=      33 | share=  0.099%
+  records=   478 | users=      33 | share=  0.099%
+  records=  1089 | users=      33 | share=  0.099%
+  records=   827 | users=      33 | share=  0.099%
+  records=   925 | users=      33 | share=  0.099%
+  records=   934 | users=      33 | share=  0.099%
+  records=   549 | users=      33 | share=  0.099%
+  records=  1146 | users=      33 | share=  0.099%
+  records=   818 | users=      33 | share=  0.099%
+  records=   937 | users=      33 | share=  0.099%
+  records=   941 | users=      33 | share=  0.099%
+  records=   743 | users=      33 | share=  0.099%
+  records=   666 | users=      33 | share=  0.099%
+  records=   633 | users=      33 | share=  0.099%
+  records=   546 | users=      32 | share=  0.096%
+  records=   388 | users=      32 | share=  0.096%
+  records=   612 | users=      32 | share=  0.096%
+  records=   662 | users=      32 | share=  0.096%
+  records=   362 | users=      32 | share=  0.096%
+  records=  1081 | users=      32 | share=  0.096%
+  records=   820 | users=      32 | share=  0.096%
+  records=   560 | users=      32 | share=  0.096%
+  records=   829 | users=      32 | share=  0.096%
+
+Топ-20 пользователей по числу записей:
+  customer_id=123166072796364 | records=    3376
+  customer_id=123277741949059 | records=    3056
+  customer_id=123432360770994 | records=    3011
+  customer_id=123286331880824 | records=    2877
+  customer_id=123260562078628 | records=    2838
+  customer_id=123131713060905 | records=    2836
+  customer_id=123166072799398 | records=    2793
+  customer_id=123449540640700 | records=    2785
+  customer_id=123183252665474 | records=    2735
+  customer_id=123200432536210 | records=    2735
+  customer_id=123251972143785 | records=    2724
+  customer_id=123423770833972 | records=    2712
+  customer_id=123251972142895 | records=    2696
+  customer_id=123131713058366 | records=    2660
+  customer_id=123148892927467 | records=    2595
+  customer_id=123423770836993 | records=    2591
+  customer_id=123226202340014 | records=    2589
+  customer_id=123157482864978 | records=    2576
+  customer_id=123492490311237 | records=    2561
+  customer_id=123432360771518 | records=    2551
+
+Сгенерированные файлы:
+  - train_part_1_hist.png
+  - train_part_1_distribution.csv
+  - train_part_1_top_users.csv
+
+[train_part_2]
+------------------------------------------------------------------------------
+Источники:
+  - data/train/train_part_2.parquet
+Всего записей (суммарно): 28558397
+Уникальных пользователей: 33333
+Среднее: 856.7605
+Std: 427.6141
+Медиана: 831.0000
+Квантили: min=22, p1=125, p5=225, p10=312, p25=522, p50=831, p75=1145, p90=1418, p95=1595, p99=1967, max=3518
+
+Топ-100 значений 'записей на пользователя' по числу пользователей:
+  records=   669 | users=      47 | share=  0.141%
+  records=   840 | users=      43 | share=  0.129%
+  records=   901 | users=      43 | share=  0.129%
+  records=  1011 | users=      42 | share=  0.126%
+  records=  1031 | users=      41 | share=  0.123%
+  records=  1029 | users=      41 | share=  0.123%
+  records=   530 | users=      40 | share=  0.120%
+  records=   978 | users=      40 | share=  0.120%
+  records=   902 | users=      40 | share=  0.120%
+  records=   907 | users=      40 | share=  0.120%
+  records=   683 | users=      40 | share=  0.120%
+  records=   939 | users=      39 | share=  0.117%
+  records=   587 | users=      39 | share=  0.117%
+  records=  1118 | users=      39 | share=  0.117%
+  records=   598 | users=      39 | share=  0.117%
+  records=   826 | users=      38 | share=  0.114%
+  records=   950 | users=      38 | share=  0.114%
+  records=   467 | users=      37 | share=  0.111%
+  records=  1071 | users=      37 | share=  0.111%
+  records=   800 | users=      37 | share=  0.111%
+  records=   588 | users=      37 | share=  0.111%
+  records=   799 | users=      37 | share=  0.111%
+  records=   567 | users=      37 | share=  0.111%
+  records=   846 | users=      37 | share=  0.111%
+  records=   995 | users=      36 | share=  0.108%
+  records=   438 | users=      36 | share=  0.108%
+  records=   787 | users=      36 | share=  0.108%
+  records=   784 | users=      36 | share=  0.108%
+  records=   531 | users=      36 | share=  0.108%
+  records=   844 | users=      36 | share=  0.108%
+  records=   854 | users=      36 | share=  0.108%
+  records=   755 | users=      36 | share=  0.108%
+  records=   681 | users=      36 | share=  0.108%
+  records=   538 | users=      36 | share=  0.108%
+  records=   987 | users=      35 | share=  0.105%
+  records=  1060 | users=      35 | share=  0.105%
+  records=  1043 | users=      35 | share=  0.105%
+  records=   743 | users=      35 | share=  0.105%
+  records=  1050 | users=      35 | share=  0.105%
+  records=   416 | users=      35 | share=  0.105%
+  records=   864 | users=      35 | share=  0.105%
+  records=  1097 | users=      35 | share=  0.105%
+  records=   820 | users=      35 | share=  0.105%
+  records=   677 | users=      35 | share=  0.105%
+  records=   857 | users=      35 | share=  0.105%
+  records=   690 | users=      35 | share=  0.105%
+  records=   682 | users=      35 | share=  0.105%
+  records=   702 | users=      35 | share=  0.105%
+  records=   657 | users=      35 | share=  0.105%
+  records=  1010 | users=      34 | share=  0.102%
+  records=   488 | users=      34 | share=  0.102%
+  records=   466 | users=      34 | share=  0.102%
+  records=   783 | users=      34 | share=  0.102%
+  records=   780 | users=      34 | share=  0.102%
+  records=   727 | users=      34 | share=  0.102%
+  records=   460 | users=      34 | share=  0.102%
+  records=   695 | users=      34 | share=  0.102%
+  records=   856 | users=      34 | share=  0.102%
+  records=   747 | users=      34 | share=  0.102%
+  records=   867 | users=      34 | share=  0.102%
+  records=   837 | users=      34 | share=  0.102%
+  records=   839 | users=      34 | share=  0.102%
+  records=   661 | users=      34 | share=  0.102%
+  records=   775 | users=      34 | share=  0.102%
+  records=   579 | users=      34 | share=  0.102%
+  records=   883 | users=      34 | share=  0.102%
+  records=   804 | users=      34 | share=  0.102%
+  records=   643 | users=      34 | share=  0.102%
+  records=   909 | users=      34 | share=  0.102%
+  records=   594 | users=      34 | share=  0.102%
+  records=   914 | users=      33 | share=  0.099%
+  records=   937 | users=      33 | share=  0.099%
+  records=   989 | users=      33 | share=  0.099%
+  records=  1068 | users=      33 | share=  0.099%
+  records=   838 | users=      33 | share=  0.099%
+  records=   436 | users=      33 | share=  0.099%
+  records=   725 | users=      33 | share=  0.099%
+  records=  1027 | users=      33 | share=  0.099%
+  records=   887 | users=      33 | share=  0.099%
+  records=   889 | users=      33 | share=  0.099%
+  records=   709 | users=      33 | share=  0.099%
+  records=   821 | users=      33 | share=  0.099%
+  records=   918 | users=      33 | share=  0.099%
+  records=   878 | users=      33 | share=  0.099%
+  records=   932 | users=      33 | share=  0.099%
+  records=   578 | users=      33 | share=  0.099%
+  records=   962 | users=      33 | share=  0.099%
+  records=   967 | users=      33 | share=  0.099%
+  records=   893 | users=      33 | share=  0.099%
+  records=   592 | users=      33 | share=  0.099%
+  records=   680 | users=      33 | share=  0.099%
+  records=   679 | users=      33 | share=  0.099%
+  records=   707 | users=      33 | share=  0.099%
+  records=   706 | users=      33 | share=  0.099%
+  records=   701 | users=      33 | share=  0.099%
+  records=   916 | users=      33 | share=  0.099%
+  records=   548 | users=      33 | share=  0.099%
+  records=   729 | users=      33 | share=  0.099%
+  records=   387 | users=      33 | share=  0.099%
+  records=  1145 | users=      33 | share=  0.099%
+
+Топ-20 пользователей по числу записей:
+  customer_id=123595569526074 | records=    3518
+  customer_id=123758778285751 | records=    3035
+  customer_id=123758778283533 | records=    3031
+  customer_id=123578389656670 | records=    2842
+  customer_id=123612749396325 | records=    2805
+  customer_id=123715828612764 | records=    2804
+  customer_id=123552619854544 | records=    2773
+  customer_id=123690058809272 | records=    2731
+  customer_id=123698648743064 | records=    2716
+  customer_id=123784548090065 | records=    2685
+  customer_id=123801727956597 | records=    2656
+  customer_id=123672878940441 | records=    2653
+  customer_id=123818907826857 | records=    2635
+  customer_id=123879037370802 | records=    2615
+  customer_id=123586979591246 | records=    2599
+  customer_id=123561209789026 | records=    2593
+  customer_id=123621339332154 | records=    2591
+  customer_id=123784548087747 | records=    2588
+  customer_id=123638519201015 | records=    2587
+  customer_id=123535439984281 | records=    2586
+
+Сгенерированные файлы:
+  - train_part_2_hist.png
+  - train_part_2_distribution.csv
+  - train_part_2_top_users.csv
+
+[train_part_3]
+------------------------------------------------------------------------------
+Источники:
+  - data/train/train_part_3.parquet
+Всего записей (суммарно): 28500849
+Уникальных пользователей: 33334
+Среднее: 855.0084
+Std: 425.1286
+Медиана: 831.0000
+Квантили: min=19, p1=124, p5=221, p10=309, p25=522, p50=831, p75=1145, p90=1408, p95=1589, p99=1957, max=3028
+
+Топ-100 значений 'записей на пользователя' по числу пользователей:
+  records=   744 | users=      46 | share=  0.138%
+  records=   782 | users=      45 | share=  0.135%
+  records=   973 | users=      43 | share=  0.129%
+  records=   682 | users=      41 | share=  0.123%
+  records=   769 | users=      40 | share=  0.120%
+  records=   510 | users=      40 | share=  0.120%
+  records=  1053 | users=      40 | share=  0.120%
+  records=   984 | users=      39 | share=  0.117%
+  records=   890 | users=      39 | share=  0.117%
+  records=   835 | users=      39 | share=  0.117%
+  records=   751 | users=      39 | share=  0.117%
+  records=   752 | users=      39 | share=  0.117%
+  records=   620 | users=      39 | share=  0.117%
+  records=   430 | users=      38 | share=  0.114%
+  records=   700 | users=      38 | share=  0.114%
+  records=   762 | users=      38 | share=  0.114%
+  records=   963 | users=      38 | share=  0.114%
+  records=   799 | users=      37 | share=  0.111%
+  records=   669 | users=      37 | share=  0.111%
+  records=   962 | users=      37 | share=  0.111%
+  records=   971 | users=      37 | share=  0.111%
+  records=   745 | users=      37 | share=  0.111%
+  records=   925 | users=      37 | share=  0.111%
+  records=  1069 | users=      37 | share=  0.111%
+  records=   966 | users=      37 | share=  0.111%
+  records=   676 | users=      37 | share=  0.111%
+  records=   597 | users=      37 | share=  0.111%
+  records=   670 | users=      36 | share=  0.108%
+  records=   537 | users=      36 | share=  0.108%
+  records=   628 | users=      36 | share=  0.108%
+  records=   693 | users=      36 | share=  0.108%
+  records=   692 | users=      36 | share=  0.108%
+  records=   923 | users=      36 | share=  0.108%
+  records=   965 | users=      36 | share=  0.108%
+  records=   913 | users=      36 | share=  0.108%
+  records=   759 | users=      36 | share=  0.108%
+  records=   871 | users=      36 | share=  0.108%
+  records=   461 | users=      36 | share=  0.108%
+  records=   854 | users=      36 | share=  0.108%
+  records=   814 | users=      36 | share=  0.108%
+  records=   974 | users=      36 | share=  0.108%
+  records=   949 | users=      36 | share=  0.108%
+  records=   876 | users=      35 | share=  0.105%
+  records=   726 | users=      35 | share=  0.105%
+  records=   857 | users=      35 | share=  0.105%
+  records=   850 | users=      35 | share=  0.105%
+  records=   961 | users=      35 | share=  0.105%
+  records=  1224 | users=      35 | share=  0.105%
+  records=   641 | users=      35 | share=  0.105%
+  records=   650 | users=      35 | share=  0.105%
+  records=   672 | users=      35 | share=  0.105%
+  records=  1077 | users=      35 | share=  0.105%
+  records=   716 | users=      35 | share=  0.105%
+  records=   591 | users=      35 | share=  0.105%
+  records=   533 | users=      35 | share=  0.105%
+  records=  1157 | users=      35 | share=  0.105%
+  records=   967 | users=      35 | share=  0.105%
+  records=  1076 | users=      34 | share=  0.102%
+  records=  1049 | users=      34 | share=  0.102%
+  records=   608 | users=      34 | share=  0.102%
+  records=   565 | users=      34 | share=  0.102%
+  records=   511 | users=      34 | share=  0.102%
+  records=   618 | users=      34 | share=  0.102%
+  records=  1125 | users=      34 | share=  0.102%
+  records=   832 | users=      34 | share=  0.102%
+  records=   898 | users=      34 | share=  0.102%
+  records=   770 | users=      34 | share=  0.102%
+  records=   958 | users=      34 | share=  0.102%
+  records=   849 | users=      34 | share=  0.102%
+  records=   915 | users=      34 | share=  0.102%
+  records=   955 | users=      34 | share=  0.102%
+  records=   754 | users=      34 | share=  0.102%
+  records=   755 | users=      34 | share=  0.102%
+  records=   705 | users=      34 | share=  0.102%
+  records=   673 | users=      34 | share=  0.102%
+  records=  1040 | users=      34 | share=  0.102%
+  records=   730 | users=      33 | share=  0.099%
+  records=   711 | users=      33 | share=  0.099%
+  records=   486 | users=      33 | share=  0.099%
+  records=  1189 | users=      33 | share=  0.099%
+  records=   617 | users=      33 | share=  0.099%
+  records=   592 | users=      33 | share=  0.099%
+  records=   609 | users=      33 | share=  0.099%
+  records=   588 | users=      33 | share=  0.099%
+  records=  1089 | users=      33 | share=  0.099%
+  records=   523 | users=      33 | share=  0.099%
+  records=  1128 | users=      33 | share=  0.099%
+  records=   575 | users=      33 | share=  0.099%
+  records=   442 | users=      33 | share=  0.099%
+  records=  1150 | users=      33 | share=  0.099%
+  records=   833 | users=      33 | share=  0.099%
+  records=   800 | users=      33 | share=  0.099%
+  records=   926 | users=      33 | share=  0.099%
+  records=   797 | users=      33 | share=  0.099%
+  records=   651 | users=      33 | share=  0.099%
+  records=   968 | users=      33 | share=  0.099%
+  records=   819 | users=      33 | share=  0.099%
+  records=  1212 | users=      33 | share=  0.099%
+  records=   883 | users=      33 | share=  0.099%
+  records=   834 | users=      33 | share=  0.099%
+
+Топ-20 пользователей по числу записей:
+  customer_id=124110965601746 | records=    3028
+  customer_id=124007886387979 | records=    2881
+  customer_id=124059425995463 | records=    2856
+  customer_id=123947756847280 | records=    2806
+  customer_id=123896217237239 | records=    2782
+  customer_id=124136735405058 | records=    2736
+  customer_id=124136735407353 | records=    2720
+  customer_id=123990706520498 | records=    2693
+  customer_id=123947756847277 | records=    2640
+  customer_id=124110965601236 | records=    2636
+  customer_id=123964936716063 | records=    2616
+  customer_id=124093785732544 | records=    2611
+  customer_id=124068015930755 | records=    2607
+  customer_id=123887627304432 | records=    2572
+  customer_id=123964936716556 | records=    2561
+  customer_id=124222634753569 | records=    2558
+  customer_id=124050836059621 | records=    2539
+  customer_id=123904807173697 | records=    2534
+  customer_id=124059425993750 | records=    2527
+  customer_id=124033656190099 | records=    2519
+
+Сгенерированные файлы:
+  - train_part_3_hist.png
+  - train_part_3_distribution.csv
+  - train_part_3_top_users.csv
+

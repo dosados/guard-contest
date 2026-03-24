@@ -1,38 +1,38 @@
 Feature importance report (permutation importance on time-based validation)
-Models: xgboost, lightgbm
-Rows used: train=4000000, val=1200000
-Permutation repeats: 10
+Model: xgboost
+Rows used: train=2000000, val=600000
+Permutation repeats: 5
 
 TOP most important features:
- 1. time_since_2nd_prev_transaction: 0.00150089
- 2. mean_time_between_tx: 0.00133769
- 3. event_descr: 0.00108626
- 4. mcc_code: 0.00099849
- 5. time_since_prev_to_mean_gap: 0.00090833
- 6. channel_freq: 0.00088291
- 7. device_freq: 0.00072606
- 8. time_since_last_channel: 0.00062432
- 9. time_since_prev_transaction: 0.00055851
-10. event_descr_freq: 0.00055324
-11. time_since_last_device: 0.00055016
-12. event_type_nm_freq: 0.00030510
-13. time_since_last_mcc: 0.00029864
-14. mcc_freq: 0.00026718
-15. std_time_between_tx: 0.00024497
+ 1. sum_amount_last_24h: 0.00129731
+ 2. amount_to_median: 0.00085639
+ 3. std_delta_last_k: 0.00079093
+ 4. time_since_prev_transaction: 0.00076716
+ 5. event_descr: 0.00066358
+ 6. transactions_last_24h: 0.00060716
+ 7. device_freq: 0.00058613
+ 8. mcc_code: 0.00057618
+ 9. delta_1: 0.00038202
+10. sum_amount_last_1h: 0.00022234
+11. operation_amt: 0.00022183
+12. amount_zscore: 0.00012700
+13. delta_3: 0.00010039
+14. amount_zscore_x_is_new_mcc: 0.00008965
+15. session_duration: 0.00008590
 
 TOP least important features:
- 1. day_of_week: -0.00001374
- 2. is_night_transaction: -0.00000716
- 3. is_weekend: -0.00000491
- 4. transactions_last_24h_norm: 0.00000000
- 5. transactions_last_10m_to_1h: 0.00000000
- 6. transactions_last_24h: 0.00000000
- 7. transactions_last_1h_to_24h: 0.00000000
- 8. transactions_last_1h_norm: 0.00000000
- 9. sum_amount_last_24h: 0.00000000
-10. sum_amount_last_1h_norm: 0.00000000
-11. operation_amt: 0.00000000
-12. sum_1h_to_24h: 0.00000000
-13. sum_amount_last_1h: 0.00000000
-14. transactions_last_1h: 0.00000000
-15. transactions_last_10m_norm: 0.00000000
+ 1. amount_ratio_prev: -0.00019080
+ 2. max_amount_last_24h: -0.00018395
+ 3. day_of_week: -0.00017389
+ 4. tr_amount: -0.00010841
+ 5. transactions_last_1h: -0.00010369
+ 6. trend_mean_last_3_to_10: -0.00009295
+ 7. session_mean_amount: -0.00008701
+ 8. time_since_last_device_change: -0.00008366
+ 9. amount_diff_prev: -0.00007729
+10. log_1_plus_transactions_seen: -0.00007686
+11. cv_delta_last_k: -0.00006024
+12. timezone_missing: -0.00002073
+13. phone_voip_call_state: -0.00001802
+14. is_device_switch: -0.00001203
+15. is_amount_high: -0.00000950
