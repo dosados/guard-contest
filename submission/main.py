@@ -46,6 +46,26 @@ EXPECTED_ROWS = 633_683
 logger = logging.getLogger(__name__)
 
 
+def _xgboost_predict_probs(booster, X: pd.DataFrame, feature_cols: list[str]) -> np.ndarray:
+    """Согласовано с training/main.py: при early stopping — только деревья до best_iteration."""
+    import xgboost as xgb
+
+    d = xgb.DMatrix(X[feature_cols], feature_names=feature_cols)
+    bi = getattr(booster, "best_iteration", None)
+    if bi is not None and bi >= 0:
+        try:
+            return np.asarray(booster.predict(d, iteration_range=(0, int(bi) + 1)), dtype=np.float64)
+        except TypeError:
+            pass
+    bnl = getattr(booster, "best_ntree_limit", None)
+    if bnl is not None and bnl > 0:
+        try:
+            return np.asarray(booster.predict(d, iteration_range=(0, int(bnl))), dtype=np.float64)
+        except TypeError:
+            return np.asarray(booster.predict(d, ntree_limit=int(bnl)), dtype=np.float64)
+    return np.asarray(booster.predict(d), dtype=np.float64)
+
+
 def proba_to_logit(p: np.ndarray) -> np.ndarray:
     p = np.clip(p.astype(np.float64), 1e-15, 1.0 - 1e-15)
     return np.log(p / (1.0 - p))
@@ -70,9 +90,10 @@ def load_predictor(model_name: str):
 
         m = XGBClassifier()
         m.load_model(str(MODEL_XGB_PATH))
+        booster = m.get_booster()
 
         def pred(X: pd.DataFrame) -> np.ndarray:
-            pr = m.predict_proba(X)[:, 1]
+            pr = _xgboost_predict_probs(booster, X, MODEL_INPUT_FEATURES)
             return proba_to_logit(pr)
 
         return pred

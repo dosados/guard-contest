@@ -171,9 +171,11 @@ compromised – наличие Root-доступа на устройстве
 
 **Точка входа:** `PYTHONPATH=. python research/main.py`
 
-- Читает тот же train-датасет, что и `train_dataset_source_paths()` (`full_dataset.parquet` или части).
-- Permutation importance по PR-AUC на временной валидации; артефакты в **`output/research/`** (csv, png, md).
-- Опции: `--models`, `--max-train-rows`, `--max-val-rows`, `--dataset /path/to.parquet`.
+- Датасет: `output/full_dataset.parquet`; признаки в том же порядке, что в `training` (`resolve_model_input_columns`).
+- По умолчанию загружается **`output/model_xgb.json`** (после `python -m training.main`); permutation importance по PR-AUC (`pos_label=1`) на временной валидации.
+- Дополнительно: нативные важности XGB в `xgb_native_importance.csv`, сводка в `xgb_feature_importance.json`, **полное ранжирование всех признаков** в `feature_ranking_all.txt`, краткий отчёт в `feature_importance_report.txt` / `.md`, графики `top_features.png` / `least_features.png`.
+- Без сохранённой модели: `--refit-on-sample` и при необходимости `--xgb-config best|default`.
+- Память и сэмплирование: `--max-train-rows`, `--max-val-rows`, `--batch-size`, `--max-memory-gb`.
 
 ### 3. Построение файла для сдачи (`submission`)
 

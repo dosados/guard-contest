@@ -1,6 +1,7 @@
 """
-Грид-сёрч гиперпараметров XGBoost в том же потоковом режиме, что и training/main.py
-(один проход по parquet, time split по event_dttm, PR-AUC на валидации).
+Грид-сёрч гиперпараметров XGBoost в том же режиме, что и training/main.py:
+DataIter + ExtMemQuantileDMatrix / QuantileDMatrix, time split по event_dttm,
+train с весами, val без весов, PR-AUC (pos_label=1), num_boost_round и early stopping из training.config.
 
 Метрика каждой конфигурации дописывается в JSONL (по умолчанию training/grid_search/xgb_grid_trials.jsonl)
 сразу после trial — удобно для анализа и при обрыве длинного прогона.
@@ -10,17 +11,15 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gc
 import itertools
 import json
 import logging
+import shutil
 import sys
 from pathlib import Path
 from typing import Any, Iterable
 
-import numpy as np
-import pandas as pd
-import pyarrow.parquet as pq
-from sklearn.metrics import average_precision_score
 from tqdm import tqdm
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -28,13 +27,21 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from shared.config import TRAIN_DATASET_PATH
-from training.config import VAL_RATIO, XGB_PARAMS
-from training.main import _detect_columns, _find_time_cutoff, _prepare_batch
+from training.config import (
+    VAL_RATIO,
+    XGB_EARLY_STOPPING_ROUNDS,
+    XGB_EXTERNAL_PARQUET_BATCH_ROWS,
+    XGB_PARAMS,
+)
+from training.parquet_io import detect_columns, find_time_cutoff
+from training.xgb_iterative_fit import fit_xgb_parquet_iterative
 
 logger = logging.getLogger(__name__)
 
 # Артефакты грид-сёрча (CSV, лучшие гиперпараметры, веса модели) — рядом с этим модулем, не в output/.
 GRID_SEARCH_DIR = Path(__file__).resolve().parent / "grid_search"
+# Дисковый кэш ExtMemQuantileDMatrix по trial — не пересекается с output/xgb_extmem_*
+GRID_EXTMEM_ROOT = GRID_SEARCH_DIR / "xgb_grid_extmem"
 
 # Сетка: ключи — имена в sklearn-стиле (как в XGB_PARAMS), значения — списки кандидатов.
 # Полный перебор ниже = 243 полных прохода по датасету; для прогона используйте --max-trials или свою сетку в коде.
@@ -46,9 +53,8 @@ DEFAULT_PARAM_GRID: dict[str, list[Any]] = {
     "min_child_weight": [3, 5, 7],
     "gamma": [0.0, 1.0, 5.0],
     "reg_alpha": [0.1],
-    "reg_lambda": [1.0, 5.0]
+    "reg_lambda": [1.0, 5.0],
 }
-
 
 
 def _xgb_params_from_grid(
@@ -85,60 +91,6 @@ def _xgb_params_from_grid(
     }
 
 
-def stream_xgb_prauc(
-    path: Path,
-    feature_cols: list[str],
-    dttm_col: str,
-    cutoff_day: pd.Timestamp,
-    xgb_params: dict[str, Any],
-    *,
-    batch_size: int = 2_000_000,
-    rounds_per_batch: int = 1,
-) -> tuple[float, Any]:
-    """Один полный проход датасета: потоковое обучение XGBoost и PR-AUC на последнем временном окне."""
-    import xgboost as xgb
-
-    pf = pq.ParquetFile(path)
-    booster = None
-    y_val_all: list[np.ndarray] = []
-    p_val_all: list[np.ndarray] = []
-
-    cols = feature_cols + ["target", "sample_weight", dttm_col]
-    for rb in tqdm(
-        pf.iter_batches(columns=cols, batch_size=batch_size),
-        desc="XGBoost grid pass",
-        unit="batch",
-    ):
-        dfb = rb.to_pandas()
-        dttm = pd.to_datetime(dfb[dttm_col], errors="coerce")
-        train_mask = dttm < cutoff_day
-        val_mask = ~train_mask
-
-        if train_mask.any():
-            xtr, ytr, wtr = _prepare_batch(dfb.loc[train_mask], feature_cols)
-            dtrain = xgb.DMatrix(xtr, label=ytr, weight=wtr, feature_names=feature_cols)
-            booster = xgb.train(
-                params=xgb_params,
-                dtrain=dtrain,
-                num_boost_round=rounds_per_batch,
-                xgb_model=booster,
-            )
-
-        if val_mask.any() and booster is not None:
-            xva, yva, _ = _prepare_batch(dfb.loc[val_mask], feature_cols)
-            dval = xgb.DMatrix(xva, label=yva, feature_names=feature_cols)
-            p = booster.predict(dval)
-            y_val_all.append(yva)
-            p_val_all.append(p.astype(np.float32))
-
-    if booster is None:
-        raise RuntimeError("XGBoost не обучился: нет train-батчей после split.")
-    yv = np.concatenate(y_val_all)
-    pv = np.concatenate(p_val_all)
-    pr = float(average_precision_score(yv, pv))
-    return pr, booster
-
-
 def _iter_grid(grid: dict[str, list[Any]]) -> Iterable[dict[str, Any]]:
     keys = list(grid.keys())
     for values in itertools.product(*(grid[k] for k in keys)):
@@ -150,12 +102,12 @@ def run_grid_search(
     param_grid: dict[str, list[Any]] | None = None,
     *,
     val_ratio: float = VAL_RATIO,
-    batch_size: int = 2_000_000,
-    rounds_per_batch: int = 1,
+    batch_size: int | None = None,
     max_trials: int | None = None,
     tree_method: str | None = None,
     random_state: int | None = None,
     trials_log_path: Path | None = None,
+    extmem_root: Path | None = None,
 ) -> tuple[dict[str, Any], float, list[dict[str, Any]], Any]:
     """
     Возвращает (лучший combo по PR-AUC, лучший score, все строки результатов, бустер лучшего прогона).
@@ -166,12 +118,17 @@ def run_grid_search(
     """
     import xgboost as xgb  # noqa: F401 — проверка, что пакет установлен
 
+    br = int(batch_size if batch_size is not None else XGB_EXTERNAL_PARQUET_BATCH_ROWS)
+    rounds = max(1, int(XGB_PARAMS.get("n_estimators", 600)))
+    es = int(XGB_EARLY_STOPPING_ROUNDS)
+    cache_root = extmem_root if extmem_root is not None else GRID_EXTMEM_ROOT
+
     grid = param_grid if param_grid is not None else DEFAULT_PARAM_GRID
     if not path.exists():
         raise FileNotFoundError(f"Не найден {path}")
 
-    feature_cols, dttm_col = _detect_columns(path)
-    cutoff_day = _find_time_cutoff(path, val_ratio, batch_size=batch_size)
+    feature_cols, dttm_col = detect_columns(path)
+    cutoff_day = find_time_cutoff(path, val_ratio, batch_size=br)
 
     combos = list(_iter_grid(grid))
     if not combos:
@@ -190,36 +147,58 @@ def run_grid_search(
         trials_log_path.unlink(missing_ok=True)
         trials_log_file = trials_log_path.open("w", encoding="utf-8")
 
+    use_extmem = hasattr(xgb, "ExtMemQuantileDMatrix")
+
     try:
-        for i, combo in enumerate(combos, start=1):
+        for i, combo in enumerate(tqdm(combos, desc="Grid trials", unit="trial"), start=1):
             params = _xgb_params_from_grid(combo, tree_method=tree_method, random_state=random_state)
             logger.info("Trial %d/%d params (xgb): %s", i, len(combos), params)
-            pr, booster = stream_xgb_prauc(
-                path,
-                feature_cols,
-                dttm_col,
-                cutoff_day,
-                params,
-                batch_size=batch_size,
-                rounds_per_batch=rounds_per_batch,
-            )
-            row = {**combo, "pr_auc": pr}
-            results.append(row)
-            logger.info("Trial %d/%d PR-AUC (val): %.6f", i, len(combos), pr)
-            if trials_log_file is not None:
-                record = {
-                    "trial_index": i,
-                    "trial_total": len(combos),
-                    "hyperparameters": combo,
-                    "xgb_train_params": params,
-                    "pr_auc_val": pr,
-                }
-                trials_log_file.write(json.dumps(record, ensure_ascii=False) + "\n")
-                trials_log_file.flush()
-            if pr > best_pr:
-                best_pr = pr
-                best_combo = combo
-                best_booster = booster
+
+            trial_dir = cache_root / f"trial_{i}"
+            train_cache = trial_dir / "train"
+            val_cache = trial_dir / "val"
+
+            try:
+                booster, pr = fit_xgb_parquet_iterative(
+                    path,
+                    feature_cols,
+                    dttm_col,
+                    cutoff_day,
+                    params,
+                    num_boost_round=rounds,
+                    batch_rows=br,
+                    train_cache_dir=train_cache,
+                    val_cache_dir=val_cache,
+                    early_stopping_rounds=es,
+                    verbose_eval=False,
+                )
+
+                row = {**combo, "pr_auc": pr}
+                results.append(row)
+                logger.info("Trial %d/%d PR-AUC (val): %.6f", i, len(combos), pr)
+                if trials_log_file is not None:
+                    record = {
+                        "trial_index": i,
+                        "trial_total": len(combos),
+                        "hyperparameters": combo,
+                        "xgb_train_params": params,
+                        "pr_auc_val": pr,
+                    }
+                    trials_log_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    trials_log_file.flush()
+                if pr > best_pr:
+                    best_pr = pr
+                    best_combo = combo
+                    if best_booster is not None:
+                        del best_booster
+                        gc.collect()
+                    best_booster = booster
+                else:
+                    del booster
+                    gc.collect()
+            finally:
+                if use_extmem:
+                    shutil.rmtree(trial_dir, ignore_errors=True)
     finally:
         if trials_log_file is not None:
             trials_log_file.close()
@@ -252,7 +231,9 @@ def main() -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
-    p = argparse.ArgumentParser(description="Грид-сёрч XGBoost (потоковый, time split, PR-AUC).")
+    p = argparse.ArgumentParser(
+        description="Грид-сёрч XGBoost (как training/main: ExtMem/Quantile + DataIter, time split, PR-AUC).",
+    )
     p.add_argument(
         "--dataset",
         type=Path,
@@ -293,8 +274,12 @@ def main() -> None:
         action="store_true",
         help="Не писать построчный лог trials.",
     )
-    p.add_argument("--batch-size", type=int, default=2_000_000)
-    p.add_argument("--rounds-per-batch", type=int, default=1)
+    p.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help=f"Батч pyarrow (по умолчанию training.config.XGB_EXTERNAL_PARQUET_BATCH_ROWS={XGB_EXTERNAL_PARQUET_BATCH_ROWS}).",
+    )
     p.add_argument("--max-trials", type=int, default=None, help="Ограничить число первых комбинаций сетки.")
     p.add_argument("--val-ratio", type=float, default=VAL_RATIO)
     args = p.parse_args()
@@ -305,7 +290,6 @@ def main() -> None:
         param_grid=DEFAULT_PARAM_GRID,
         val_ratio=args.val_ratio,
         batch_size=args.batch_size,
-        rounds_per_batch=args.rounds_per_batch,
         max_trials=args.max_trials,
         trials_log_path=trials_log,
     )

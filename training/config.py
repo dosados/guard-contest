@@ -38,6 +38,13 @@ XGB_PARAMS = {
     "eval_metric": "aucpr",
 }
 
+# Мониторинг eval_metric (aucpr) на val при обучении в training/main.py
+XGB_EARLY_STOPPING_ROUNDS = 50  # 0 — только evals, без остановки
+XGB_EVAL_VERBOSE_EVERY = 50  # печать каждые N раундов; 0 — тихо
+
+# Размер батча pyarrow при чтении parquet для QuantileDMatrix + DataIter (training/main.py)
+XGB_EXTERNAL_PARQUET_BATCH_ROWS = 1_000_000
+
 
 def _load_xgb_hyperparams_from_grid_search() -> dict[str, float | int]:
     defaults: dict[str, float | int] = {

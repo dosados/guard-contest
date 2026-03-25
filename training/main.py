@@ -1,81 +1,35 @@
 """
-Побатчевое обучение бустингов из объединённого train_dataset.parquet.
-Чтение идёт батчами через pyarrow + tqdm, без загрузки всего датасета в RAM.
+Обучение XGBoost на объединённом full_dataset.parquet.
+Сплит train/val по времени; батчи parquet через DataIter + ExtMemQuantileDMatrix (XGBoost 3.x):
+квантили и промежуточные данные выносятся на диск (cache_prefix), без загрузки всего parquet в RAM.
+При отсутствии ExtMemQuantileDMatrix — откат на QuantileDMatrix (может потребовать много RAM).
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import shutil
 import sys
-from collections import Counter
 from pathlib import Path
-
-import numpy as np
-import pandas as pd
-import pyarrow.parquet as pq
-from sklearn.metrics import average_precision_score
-from tqdm import tqdm
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from shared.config import (
-    MODEL_LGB_PATH,
-    MODEL_XGB_PATH,
-    TRAIN_DATASET_PATH,
-    remap_sample_weight_from_dataset,
-    resolve_model_input_columns,
+from shared.config import MODEL_XGB_PATH, OUTPUT_DIR, TRAIN_DATASET_PATH
+from training.config import (
+    VAL_RATIO,
+    XGB_EARLY_STOPPING_ROUNDS,
+    XGB_EVAL_VERBOSE_EVERY,
+    XGB_EXTERNAL_PARQUET_BATCH_ROWS,
+    XGB_MODEL_HYPERPARAMS,
+    XGB_PARAMS,
 )
-from training.config import CATBOOST_PARAMS, LGBM_PARAMS, VAL_RATIO, XGB_MODEL_HYPERPARAMS, XGB_PARAMS
+from training.parquet_io import detect_columns, find_time_cutoff
+from training.xgb_iterative_fit import fit_xgb_parquet_iterative
 
 logger = logging.getLogger(__name__)
-
-
-def _prepare_batch(dfb: pd.DataFrame, feature_cols: list[str]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    x = dfb[feature_cols].apply(pd.to_numeric, errors="coerce").astype(np.float32).to_numpy(copy=False)
-    y = pd.to_numeric(dfb["target"], errors="coerce").fillna(0).astype(np.int32).to_numpy(copy=False)
-    w = pd.to_numeric(dfb["sample_weight"], errors="coerce").fillna(1.0).astype(np.float32).to_numpy(copy=False)
-    w = remap_sample_weight_from_dataset(w)
-    return x, y, w
-
-
-def _detect_columns(path: Path) -> tuple[list[str], str]:
-    pf = pq.ParquetFile(path)
-    names = pf.schema_arrow.names
-    feature_cols = resolve_model_input_columns(names)
-    if "event_dttm" not in names:
-        raise ValueError("В датасете нет колонки event_dttm")
-    if "target" not in names or "sample_weight" not in names:
-        raise ValueError("В датасете нет target/sample_weight")
-    return feature_cols, "event_dttm"
-
-
-def _find_time_cutoff(path: Path, val_ratio: float, batch_size: int = 2_500_000) -> pd.Timestamp:
-    """Определяем time-cutoff по дням без полной загрузки датасета."""
-    pf = pq.ParquetFile(path)
-    by_day: Counter[pd.Timestamp] = Counter()
-    total = 0
-    for rb in tqdm(pf.iter_batches(columns=["event_dttm"], batch_size=batch_size), desc="Скан дат", unit="batch"):
-        s = pd.to_datetime(rb.column(0).to_pandas(), errors="coerce").dt.floor("D")
-        vc = s.value_counts(dropna=True)
-        for k, v in vc.items():
-            by_day[k] += int(v)
-            total += int(v)
-    if total == 0:
-        raise ValueError("Не удалось прочитать event_dttm для split по времени.")
-    val_target = max(1, int(total * val_ratio))
-    acc = 0
-    cutoff = None
-    for day, cnt in sorted(by_day.items(), reverse=True):
-        acc += cnt
-        cutoff = day
-        if acc >= val_target:
-            break
-    assert cutoff is not None
-    logger.info("Time split cutoff day: %s (val target rows ~= %d)", cutoff.date(), val_target)
-    return cutoff
 
 
 def _build_xgb_train_params(config_mode: str) -> dict[str, float | int | str]:
@@ -114,9 +68,9 @@ def main() -> None:
     parser.add_argument(
         "--xgb-config",
         choices=("best", "default"),
-        default="best",
-        help="best (по умолчанию): гиперпараметры из training/grid_search/xgb_best_params.json; "
-        "default: базовые XGB_PARAMS из training/config.py",
+        default="default",
+        help="default (по умолчанию): базовые XGB_PARAMS из training/config.py; "
+        "best: гиперпараметры из training/grid_search/xgb_best_params.json",
     )
     args = parser.parse_args()
 
@@ -125,106 +79,76 @@ def main() -> None:
             f"Не найден {TRAIN_DATASET_PATH}. "
             "Сначала соберите датасет: ./dataset_cpp/build/build_dataset ."
         )
-    feature_cols, dttm_col = _detect_columns(TRAIN_DATASET_PATH)
-    cutoff_day = _find_time_cutoff(TRAIN_DATASET_PATH, VAL_RATIO)
-    pf = pq.ParquetFile(TRAIN_DATASET_PATH)
+    feature_cols, dttm_col = detect_columns(TRAIN_DATASET_PATH)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    cutoff_day = find_time_cutoff(TRAIN_DATASET_PATH, VAL_RATIO)
+
+    ext_train_cache = OUTPUT_DIR / "xgb_extmem_train"
+    ext_val_cache = OUTPUT_DIR / "xgb_extmem_val"
 
     results: list[tuple[str, float]] = []
 
-    logger.warning("CatBoost отключен в streaming-режиме: нет стабильного побатчевого обучения без загрузки всего train в память.")
+    logger.warning("CatBoost в этом скрипте не обучается — отдельный пайплайн.")
 
-    # --- XGBoost: побатчевое дообучение ---
     try:
         import xgboost as xgb
 
+        use_extmem = hasattr(xgb, "ExtMemQuantileDMatrix")
+        if not use_extmem:
+            logger.warning(
+                "В этой сборке XGBoost нет ExtMemQuantileDMatrix — используется QuantileDMatrix "
+                "(без дискового кэша итератора, возможен большой расход RAM)."
+            )
+
         params = _build_xgb_train_params(args.xgb_config)
+        rounds = max(1, int(XGB_PARAMS.get("n_estimators", 600)))
         logger.info("XGBoost config mode: %s", args.xgb_config)
-        logger.info("XGBoost train params: %s", params)
-        booster = None
-        rounds_per_batch = 1
-        y_val_all: list[np.ndarray] = []
-        p_val_all: list[np.ndarray] = []
-        for rb in tqdm(
-            pf.iter_batches(columns=feature_cols + ["target", "sample_weight", dttm_col], batch_size=2_000_000),
-            desc="XGBoost stream fit",
-            unit="batch",
-        ):
-            dfb = rb.to_pandas()
-            dttm = pd.to_datetime(dfb[dttm_col], errors="coerce")
-            train_mask = dttm < cutoff_day
-            val_mask = ~train_mask
+        logger.info("XGBoost train params: %s, num_boost_round=%d", params, rounds)
 
-            if train_mask.any():
-                xtr, ytr, wtr = _prepare_batch(dfb.loc[train_mask], feature_cols)
-                dtrain = xgb.DMatrix(xtr, label=ytr, weight=wtr, feature_names=feature_cols)
-                booster = xgb.train(params=params, dtrain=dtrain, num_boost_round=rounds_per_batch, xgb_model=booster)
+        br = int(XGB_EXTERNAL_PARQUET_BATCH_ROWS)
+        if use_extmem:
+            logger.info(
+                "XGBoost: ExtMemQuantileDMatrix train (batch_rows=%d, disk cache=%s) …",
+                br,
+                ext_train_cache,
+            )
+        else:
+            logger.info("XGBoost: QuantileDMatrix train (batch_rows=%d) …", br)
 
-            if val_mask.any() and booster is not None:
-                xva, yva, _ = _prepare_batch(dfb.loc[val_mask], feature_cols)
-                dval = xgb.DMatrix(xva, label=yva, feature_names=feature_cols)
-                p = booster.predict(dval)
-                y_val_all.append(yva)
-                p_val_all.append(p.astype(np.float32))
+        booster, pr = fit_xgb_parquet_iterative(
+            TRAIN_DATASET_PATH,
+            feature_cols,
+            dttm_col,
+            cutoff_day,
+            params,
+            num_boost_round=rounds,
+            batch_rows=br,
+            train_cache_dir=ext_train_cache,
+            val_cache_dir=ext_val_cache,
+            early_stopping_rounds=int(XGB_EARLY_STOPPING_ROUNDS),
+            verbose_eval=int(XGB_EVAL_VERBOSE_EVERY),
+        )
 
-        if booster is None:
-            raise RuntimeError("XGBoost не обучился: нет train-батчей после split.")
-        pr = average_precision_score(np.concatenate(y_val_all), np.concatenate(p_val_all))
-        results.append(("XGBoost", float(pr)))
+        bi = getattr(booster, "best_iteration", None)
+        if bi is not None and bi >= 0:
+            logger.info("XGBoost best_iteration (лучший невзвешенный aucpr на eval): %s", bi)
+
+        results.append(("XGBoost", pr))
         booster.save_model(str(MODEL_XGB_PATH))
-        logger.info("XGBoost PR-AUC (val): %.6f → %s", pr, MODEL_XGB_PATH)
+        logger.info("XGBoost PR-AUC (val, невзвешенный, pos_label=1): %.6f → %s", pr, MODEL_XGB_PATH)
+
+        if use_extmem:
+            logger.info(
+                "Дисковый кэш ExtMemQuantileDMatrix удалён (%s, %s).",
+                ext_train_cache.name,
+                ext_val_cache.name,
+            )
+
     except Exception as e:
         logger.warning("XGBoost пропущен: %s", e)
-
-    # --- LightGBM: побатчевое дообучение ---
-    try:
-        import lightgbm as lgb
-
-        params = {
-            "objective": "binary",
-            "metric": "average_precision",
-            "learning_rate": LGBM_PARAMS.get("learning_rate", 0.05),
-            "num_leaves": LGBM_PARAMS.get("num_leaves", 64),
-            "max_depth": LGBM_PARAMS.get("max_depth", -1),
-            "feature_fraction": LGBM_PARAMS.get("colsample_bytree", 0.8),
-            "bagging_fraction": LGBM_PARAMS.get("subsample", 0.8),
-            "verbose": -1,
-            "seed": LGBM_PARAMS.get("random_state", 42),
-        }
-        booster = None
-        rounds_per_batch = 1
-        y_val_all = []
-        p_val_all = []
-        for rb in tqdm(
-            pf.iter_batches(columns=feature_cols + ["target", "sample_weight", dttm_col], batch_size=2_000_000),
-            desc="LightGBM stream fit",
-            unit="batch",
-        ):
-            dfb = rb.to_pandas()
-            dttm = pd.to_datetime(dfb[dttm_col], errors="coerce")
-            train_mask = dttm < cutoff_day
-            val_mask = ~train_mask
-
-            if train_mask.any():
-                xtr, ytr, wtr = _prepare_batch(dfb.loc[train_mask], feature_cols)
-                Xtr = pd.DataFrame(xtr, columns=feature_cols)
-                dtrain = lgb.Dataset(Xtr, label=ytr, weight=wtr, free_raw_data=True)
-                booster = lgb.train(params, dtrain, num_boost_round=rounds_per_batch, init_model=booster, keep_training_booster=True)
-
-            if val_mask.any() and booster is not None:
-                xva, yva, _ = _prepare_batch(dfb.loc[val_mask], feature_cols)
-                Xva = pd.DataFrame(xva, columns=feature_cols)
-                p = booster.predict(Xva)
-                y_val_all.append(yva)
-                p_val_all.append(np.asarray(p, dtype=np.float32))
-
-        if booster is None:
-            raise RuntimeError("LightGBM не обучился: нет train-батчей после split.")
-        pr = average_precision_score(np.concatenate(y_val_all), np.concatenate(p_val_all))
-        results.append(("LightGBM", float(pr)))
-        booster.save_model(str(MODEL_LGB_PATH))
-        logger.info("LightGBM PR-AUC (val): %.6f → %s", pr, MODEL_LGB_PATH)
-    except Exception as e:
-        logger.warning("LightGBM пропущен: %s", e)
+        for p in (ext_train_cache, ext_val_cache):
+            if p.exists():
+                shutil.rmtree(p, ignore_errors=True)
 
     logger.info("=== Сводка PR-AUC (валидация по времени) ===")
     for name, pr in sorted(results, key=lambda x: -x[1]):

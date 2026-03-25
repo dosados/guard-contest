@@ -1,0 +1,633 @@
+{
+  "model_source": "saved_model",
+  "model_path": "/home/mants/Documents/own/guard-contest/output/model_xgb.json",
+  "baseline_pr_auc_permutation": 0.016008013977982488,
+  "permutation_by_feature": [
+    {
+      "feature": "sum_amount_last_24h",
+      "importance_drop_pr_auc": 0.00961643280940517
+    },
+    {
+      "feature": "event_descr",
+      "importance_drop_pr_auc": 0.00656394823577027
+    },
+    {
+      "feature": "max_amount_last_24h",
+      "importance_drop_pr_auc": 0.006279363025964416
+    },
+    {
+      "feature": "device_freq",
+      "importance_drop_pr_auc": 0.0037676217044861496
+    },
+    {
+      "feature": "std_delta_last_k",
+      "importance_drop_pr_auc": 0.003259201211604293
+    },
+    {
+      "feature": "mcc_code",
+      "importance_drop_pr_auc": 0.0029748481647255366
+    },
+    {
+      "feature": "operation_amt",
+      "importance_drop_pr_auc": 0.002787585157807969
+    },
+    {
+      "feature": "transactions_last_24h",
+      "importance_drop_pr_auc": 0.0027577596902639014
+    },
+    {
+      "feature": "std_time_deltas",
+      "importance_drop_pr_auc": 0.0025455250921858253
+    },
+    {
+      "feature": "sum_amount_last_1h",
+      "importance_drop_pr_auc": 0.0021513191335060596
+    },
+    {
+      "feature": "time_since_last_device_change",
+      "importance_drop_pr_auc": 0.0019852116184224263
+    },
+    {
+      "feature": "delta_1",
+      "importance_drop_pr_auc": 0.001838286704742355
+    },
+    {
+      "feature": "hour",
+      "importance_drop_pr_auc": 0.0018110756091744898
+    },
+    {
+      "feature": "delta_3",
+      "importance_drop_pr_auc": 0.0012299638168155869
+    },
+    {
+      "feature": "amount_percentile_rank",
+      "importance_drop_pr_auc": 0.0009480929599536999
+    },
+    {
+      "feature": "timezone_missing",
+      "importance_drop_pr_auc": 0.0009432253231678459
+    },
+    {
+      "feature": "time_since_prev_transaction",
+      "importance_drop_pr_auc": 0.000885577252000826
+    },
+    {
+      "feature": "transactions_last_10m",
+      "importance_drop_pr_auc": 0.0007723665912065875
+    },
+    {
+      "feature": "amount_ratio_prev",
+      "importance_drop_pr_auc": 0.0007647348318448492
+    },
+    {
+      "feature": "cv_delta_last_k",
+      "importance_drop_pr_auc": 0.000764114920248752
+    },
+    {
+      "feature": "log_1_plus_transactions_seen",
+      "importance_drop_pr_auc": 0.0007226511141928841
+    },
+    {
+      "feature": "amount_zscore",
+      "importance_drop_pr_auc": 0.0006681612248118505
+    },
+    {
+      "feature": "amount_to_median",
+      "importance_drop_pr_auc": 0.0006335734848234825
+    },
+    {
+      "feature": "day_of_week",
+      "importance_drop_pr_auc": 0.00036681223333103754
+    },
+    {
+      "feature": "session_duration",
+      "importance_drop_pr_auc": 0.0003053435840428238
+    },
+    {
+      "feature": "is_new_device",
+      "importance_drop_pr_auc": 0.0002276818670727071
+    },
+    {
+      "feature": "tr_amount",
+      "importance_drop_pr_auc": 0.0001930004386690342
+    },
+    {
+      "feature": "web_rdp_connection",
+      "importance_drop_pr_auc": 0.00015469661409367105
+    },
+    {
+      "feature": "phone_voip_call_state",
+      "importance_drop_pr_auc": 0.00013399110636222594
+    },
+    {
+      "feature": "is_new_channel",
+      "importance_drop_pr_auc": 8.571785626434666e-05
+    },
+    {
+      "feature": "is_mcc_switch",
+      "importance_drop_pr_auc": 7.321591818510581e-06
+    },
+    {
+      "feature": "session_mean_amount",
+      "importance_drop_pr_auc": 3.7997533155031958e-06
+    },
+    {
+      "feature": "is_new_timezone",
+      "importance_drop_pr_auc": 3.8397377744719964e-08
+    },
+    {
+      "feature": "is_new_device_tz_pair",
+      "importance_drop_pr_auc": -8.670355824136333e-08
+    },
+    {
+      "feature": "is_weekend",
+      "importance_drop_pr_auc": -3.711913193454874e-07
+    },
+    {
+      "feature": "is_new_browser_language",
+      "importance_drop_pr_auc": -5.374069192980168e-07
+    },
+    {
+      "feature": "is_compromised_device",
+      "importance_drop_pr_auc": -1.0458624063687526e-06
+    },
+    {
+      "feature": "is_new_device_x_is_new_timezone",
+      "importance_drop_pr_auc": -2.334112669163252e-06
+    },
+    {
+      "feature": "is_new_mcc",
+      "importance_drop_pr_auc": -3.0610838051600696e-06
+    },
+    {
+      "feature": "is_timezone_change",
+      "importance_drop_pr_auc": -1.2517338158479773e-05
+    },
+    {
+      "feature": "is_device_switch",
+      "importance_drop_pr_auc": -1.7011101972810167e-05
+    },
+    {
+      "feature": "is_night_transaction",
+      "importance_drop_pr_auc": -1.974215559042286e-05
+    },
+    {
+      "feature": "transactions_in_session",
+      "importance_drop_pr_auc": -2.4168613681924826e-05
+    },
+    {
+      "feature": "amount_zscore_x_is_new_device",
+      "importance_drop_pr_auc": -2.8272536427223492e-05
+    },
+    {
+      "feature": "delta_2",
+      "importance_drop_pr_auc": -4.4446027193489195e-05
+    },
+    {
+      "feature": "amount_zscore_x_is_new_mcc",
+      "importance_drop_pr_auc": -4.470436980155285e-05
+    },
+    {
+      "feature": "acceleration_delta_1_over_2",
+      "importance_drop_pr_auc": -8.311234069343088e-05
+    },
+    {
+      "feature": "trend_mean_last_3_to_10",
+      "importance_drop_pr_auc": -0.00015243171749696472
+    },
+    {
+      "feature": "time_since_last_mcc_change",
+      "importance_drop_pr_auc": -0.0004006059451345828
+    },
+    {
+      "feature": "is_amount_high",
+      "importance_drop_pr_auc": -0.00041788567532378556
+    },
+    {
+      "feature": "transactions_last_1h",
+      "importance_drop_pr_auc": -0.0005068336937182206
+    },
+    {
+      "feature": "amount_diff_prev",
+      "importance_drop_pr_auc": -0.0009287486907554168
+    }
+  ],
+  "native_by_feature": [
+    {
+      "feature": "operation_amt",
+      "gain": 217.67750549316406,
+      "weight": 5192.0,
+      "cover": 29395.3984375,
+      "total_gain": 1130181.625,
+      "total_cover": 152620912.0
+    },
+    {
+      "feature": "log_1_plus_transactions_seen",
+      "gain": 76.48513793945312,
+      "weight": 5038.0,
+      "cover": 9767.2607421875,
+      "total_gain": 385332.125,
+      "total_cover": 49207460.0
+    },
+    {
+      "feature": "amount_to_median",
+      "gain": 187.72616577148438,
+      "weight": 4116.0,
+      "cover": 11149.845703125,
+      "total_gain": 772680.875,
+      "total_cover": 45892764.0
+    },
+    {
+      "feature": "amount_zscore",
+      "gain": 117.26505279541016,
+      "weight": 4290.0,
+      "cover": 9223.2431640625,
+      "total_gain": 503067.0625,
+      "total_cover": 39567712.0
+    },
+    {
+      "feature": "is_amount_high",
+      "gain": 615.9282836914062,
+      "weight": 96.0,
+      "cover": 12036.3544921875,
+      "total_gain": 59129.1171875,
+      "total_cover": 1155490.0
+    },
+    {
+      "feature": "transactions_last_1h",
+      "gain": 204.6252899169922,
+      "weight": 1268.0,
+      "cover": 24193.650390625,
+      "total_gain": 259464.875,
+      "total_cover": 30677548.0
+    },
+    {
+      "feature": "transactions_last_24h",
+      "gain": 136.70220947265625,
+      "weight": 2593.0,
+      "cover": 18179.771484375,
+      "total_gain": 354468.8125,
+      "total_cover": 47140148.0
+    },
+    {
+      "feature": "sum_amount_last_1h",
+      "gain": 936.502197265625,
+      "weight": 2827.0,
+      "cover": 21674.857421875,
+      "total_gain": 2647491.75,
+      "total_cover": 61274820.0
+    },
+    {
+      "feature": "max_amount_last_24h",
+      "gain": 128.0063934326172,
+      "weight": 4345.0,
+      "cover": 21178.939453125,
+      "total_gain": 556187.8125,
+      "total_cover": 92022488.0
+    },
+    {
+      "feature": "is_new_device",
+      "gain": 175.73548889160156,
+      "weight": 97.0,
+      "cover": 17414.556640625,
+      "total_gain": 17046.341796875,
+      "total_cover": 1689212.0
+    },
+    {
+      "feature": "is_new_mcc",
+      "gain": 129.0659942626953,
+      "weight": 131.0,
+      "cover": 25557.732421875,
+      "total_gain": 16907.64453125,
+      "total_cover": 3348063.0
+    },
+    {
+      "feature": "is_new_channel",
+      "gain": 90.00630187988281,
+      "weight": 275.0,
+      "cover": 32390.1640625,
+      "total_gain": 24751.732421875,
+      "total_cover": 8907295.0
+    },
+    {
+      "feature": "is_new_timezone",
+      "gain": 59.46414566040039,
+      "weight": 12.0,
+      "cover": 12780.8486328125,
+      "total_gain": 713.5697631835938,
+      "total_cover": 153370.1875
+    },
+    {
+      "feature": "is_compromised_device",
+      "gain": 46.36503601074219,
+      "weight": 26.0,
+      "cover": 234884.0625,
+      "total_gain": 1205.490966796875,
+      "total_cover": 6106985.5
+    },
+    {
+      "feature": "web_rdp_connection",
+      "gain": 91.48767852783203,
+      "weight": 303.0,
+      "cover": 34361.91796875,
+      "total_gain": 27720.767578125,
+      "total_cover": 10411661.0
+    },
+    {
+      "feature": "phone_voip_call_state",
+      "gain": 72.7610092163086,
+      "weight": 282.0,
+      "cover": 17703.634765625,
+      "total_gain": 20518.60546875,
+      "total_cover": 4992425.0
+    },
+    {
+      "feature": "hour",
+      "gain": 110.94889831542969,
+      "weight": 4461.0,
+      "cover": 16060.7626953125,
+      "total_gain": 494943.03125,
+      "total_cover": 71647064.0
+    },
+    {
+      "feature": "day_of_week",
+      "gain": 87.7117691040039,
+      "weight": 2137.0,
+      "cover": 15891.2958984375,
+      "total_gain": 187440.046875,
+      "total_cover": 33959700.0
+    },
+    {
+      "feature": "is_night_transaction",
+      "gain": 93.50836944580078,
+      "weight": 170.0,
+      "cover": 5218.55517578125,
+      "total_gain": 15896.4228515625,
+      "total_cover": 887154.375
+    },
+    {
+      "feature": "is_weekend",
+      "gain": 129.82687377929688,
+      "weight": 105.0,
+      "cover": 4276.58740234375,
+      "total_gain": 13631.822265625,
+      "total_cover": 449041.6875
+    },
+    {
+      "feature": "transactions_last_10m",
+      "gain": 172.3019256591797,
+      "weight": 1172.0,
+      "cover": 21393.595703125,
+      "total_gain": 201937.859375,
+      "total_cover": 25073294.0
+    },
+    {
+      "feature": "sum_amount_last_24h",
+      "gain": 528.0269775390625,
+      "weight": 3550.0,
+      "cover": 22748.904296875,
+      "total_gain": 1874495.875,
+      "total_cover": 80758608.0
+    },
+    {
+      "feature": "time_since_prev_transaction",
+      "gain": 121.60566711425781,
+      "weight": 5938.0,
+      "cover": 15720.4267578125,
+      "total_gain": 722094.4375,
+      "total_cover": 93347896.0
+    },
+    {
+      "feature": "is_new_browser_language",
+      "gain": 76.961181640625,
+      "weight": 43.0,
+      "cover": 140833.5625,
+      "total_gain": 3309.330810546875,
+      "total_cover": 6055843.5
+    },
+    {
+      "feature": "transactions_in_session",
+      "gain": 72.58294677734375,
+      "weight": 429.0,
+      "cover": 45535.7265625,
+      "total_gain": 31138.083984375,
+      "total_cover": 19534826.0
+    },
+    {
+      "feature": "timezone_missing",
+      "gain": 156.72459411621094,
+      "weight": 215.0,
+      "cover": 93459.4609375,
+      "total_gain": 33695.7890625,
+      "total_cover": 20093784.0
+    },
+    {
+      "feature": "tr_amount",
+      "gain": 78.47035217285156,
+      "weight": 1033.0,
+      "cover": 8109.66357421875,
+      "total_gain": 81059.875,
+      "total_cover": 8377282.5
+    },
+    {
+      "feature": "event_descr",
+      "gain": 352.3957824707031,
+      "weight": 4083.0,
+      "cover": 36585.609375,
+      "total_gain": 1438832.0,
+      "total_cover": 149379040.0
+    },
+    {
+      "feature": "mcc_code",
+      "gain": 780.509033203125,
+      "weight": 1700.0,
+      "cover": 38208.203125,
+      "total_gain": 1326865.375,
+      "total_cover": 64953948.0
+    },
+    {
+      "feature": "amount_diff_prev",
+      "gain": 76.06107330322266,
+      "weight": 2979.0,
+      "cover": 7846.1806640625,
+      "total_gain": 226585.9375,
+      "total_cover": 23373772.0
+    },
+    {
+      "feature": "amount_ratio_prev",
+      "gain": 79.96128845214844,
+      "weight": 3673.0,
+      "cover": 17470.33984375,
+      "total_gain": 293697.8125,
+      "total_cover": 64168560.0
+    },
+    {
+      "feature": "trend_mean_last_3_to_10",
+      "gain": 91.74037170410156,
+      "weight": 5945.0,
+      "cover": 11759.46484375,
+      "total_gain": 545396.5,
+      "total_cover": 69910016.0
+    },
+    {
+      "feature": "amount_percentile_rank",
+      "gain": 93.81092071533203,
+      "weight": 2867.0,
+      "cover": 7989.89404296875,
+      "total_gain": 268955.90625,
+      "total_cover": 22907026.0
+    },
+    {
+      "feature": "std_time_deltas",
+      "gain": 169.41680908203125,
+      "weight": 6122.0,
+      "cover": 14612.486328125,
+      "total_gain": 1037169.6875,
+      "total_cover": 89457640.0
+    },
+    {
+      "feature": "is_timezone_change",
+      "gain": 61.52717971801758,
+      "weight": 28.0,
+      "cover": 25516.845703125,
+      "total_gain": 1722.760986328125,
+      "total_cover": 714471.6875
+    },
+    {
+      "feature": "is_new_device_tz_pair",
+      "gain": 84.31988525390625,
+      "weight": 23.0,
+      "cover": 5326.36962890625,
+      "total_gain": 1939.3572998046875,
+      "total_cover": 122506.5
+    },
+    {
+      "feature": "is_device_switch",
+      "gain": 78.10037231445312,
+      "weight": 157.0,
+      "cover": 30008.25390625,
+      "total_gain": 12261.7587890625,
+      "total_cover": 4711296.0
+    },
+    {
+      "feature": "is_mcc_switch",
+      "gain": 172.60508728027344,
+      "weight": 228.0,
+      "cover": 39193.20703125,
+      "total_gain": 39353.9609375,
+      "total_cover": 8936051.0
+    },
+    {
+      "feature": "session_duration",
+      "gain": 99.00794982910156,
+      "weight": 1635.0,
+      "cover": 15539.1689453125,
+      "total_gain": 161878.0,
+      "total_cover": 25406542.0
+    },
+    {
+      "feature": "session_mean_amount",
+      "gain": 143.91610717773438,
+      "weight": 1844.0,
+      "cover": 19566.658203125,
+      "total_gain": 265381.3125,
+      "total_cover": 36080916.0
+    },
+    {
+      "feature": "amount_zscore_x_is_new_device",
+      "gain": 56.00139617919922,
+      "weight": 33.0,
+      "cover": 72039.671875,
+      "total_gain": 1848.0460205078125,
+      "total_cover": 2377309.25
+    },
+    {
+      "feature": "amount_zscore_x_is_new_mcc",
+      "gain": 79.10327911376953,
+      "weight": 898.0,
+      "cover": 21590.1484375,
+      "total_gain": 71034.7421875,
+      "total_cover": 19387954.0
+    },
+    {
+      "feature": "is_new_device_x_is_new_timezone",
+      "gain": 150.347412109375,
+      "weight": 64.0,
+      "cover": 11112.2724609375,
+      "total_gain": 9622.234375,
+      "total_cover": 711185.4375
+    },
+    {
+      "feature": "device_freq",
+      "gain": 123.3792495727539,
+      "weight": 2706.0,
+      "cover": 13140.2236328125,
+      "total_gain": 333864.25,
+      "total_cover": 35557444.0
+    },
+    {
+      "feature": "delta_1",
+      "gain": 92.60655975341797,
+      "weight": 4966.0,
+      "cover": 15043.091796875,
+      "total_gain": 459884.1875,
+      "total_cover": 74703992.0
+    },
+    {
+      "feature": "delta_2",
+      "gain": 82.53986358642578,
+      "weight": 4895.0,
+      "cover": 11893.044921875,
+      "total_gain": 404032.625,
+      "total_cover": 58216456.0
+    },
+    {
+      "feature": "delta_3",
+      "gain": 79.79454803466797,
+      "weight": 5606.0,
+      "cover": 13118.0048828125,
+      "total_gain": 447328.21875,
+      "total_cover": 73539536.0
+    },
+    {
+      "feature": "acceleration_delta_1_over_2",
+      "gain": 70.31814575195312,
+      "weight": 4817.0,
+      "cover": 10652.029296875,
+      "total_gain": 338722.5,
+      "total_cover": 51310824.0
+    },
+    {
+      "feature": "std_delta_last_k",
+      "gain": 217.74822998046875,
+      "weight": 5242.0,
+      "cover": 18137.041015625,
+      "total_gain": 1141436.25,
+      "total_cover": 95074368.0
+    },
+    {
+      "feature": "cv_delta_last_k",
+      "gain": 75.68583679199219,
+      "weight": 5461.0,
+      "cover": 9976.044921875,
+      "total_gain": 413320.34375,
+      "total_cover": 54479180.0
+    },
+    {
+      "feature": "time_since_last_device_change",
+      "gain": 94.07671356201172,
+      "weight": 3936.0,
+      "cover": 18031.21875,
+      "total_gain": 370285.9375,
+      "total_cover": 70970880.0
+    },
+    {
+      "feature": "time_since_last_mcc_change",
+      "gain": 120.70722198486328,
+      "weight": 3477.0,
+      "cover": 16670.52734375,
+      "total_gain": 419699.0,
+      "total_cover": 57963424.0
+    }
+  ]
+}
