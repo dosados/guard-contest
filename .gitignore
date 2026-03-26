@@ -6,6 +6,8 @@ data/test/*
 
 # CatBoost training artifacts
 catboost_info/
+*.tfevents
+*.tmp
 
 # Model weights (any location)
 *.cbm
@@ -19,10 +21,17 @@ output/full_dataset.parquet
 output/model_xgb.json
 output/model_lgb.txt
 output/model_pytorch.pt
+output/xgb_grid_extmem_train/
+output/xgb_grid_extmem_val/
 
 # CSV (submission и прочее; исключение — таблицы исследований)
 *.csv
 !output/research/*.csv
+
+# Служебные JSONL артефакты обучения/поиска
+training/grid_search/model_xgb_best.json
+training/grid_search/xgb_grid_trials.jsonl
+output/research/xgb_forward_selection_history.jsonl
 
 # Python cache / packaging
 __pycache__/
