@@ -26,17 +26,14 @@ def _percentile_95(values: list[float]) -> float:
 FEATURE_NAMES: list[str] = [
     "operation_amt",
     "log_1_plus_transactions_seen",
-    "amount_to_median",
     "amount_zscore",
     "is_amount_high",
-    "transactions_last_1h",
     "transactions_last_24h",
     "sum_amount_last_1h",
     "max_amount_last_24h",
     "is_new_device",
     "is_new_mcc",
     "is_new_channel",
-    "is_new_timezone",
     "is_compromised_device",
     "web_rdp_connection",
     "phone_voip_call_state",
@@ -53,29 +50,31 @@ FEATURE_NAMES: list[str] = [
     "tr_amount",
     "event_descr",
     "mcc_code",
-    "amount_diff_prev",
-    "amount_ratio_prev",
     "trend_mean_last_3_to_10",
     "amount_percentile_rank",
     "std_time_deltas",
-    "is_timezone_change",
     "is_new_device_tz_pair",
     "is_device_switch",
     "is_mcc_switch",
     "session_duration",
     "session_mean_amount",
-    "amount_zscore_x_is_new_device",
-    "amount_zscore_x_is_new_mcc",
-    "is_new_device_x_is_new_timezone",
     "device_freq",
     "delta_1",
     "delta_2",
     "delta_3",
     "acceleration_delta_1_over_2",
     "std_delta_last_k",
-    "cv_delta_last_k",
     "time_since_last_device_change",
     "time_since_last_mcc_change",
+    "event_descr_freq_last_1h",
+    "event_descr_freq_last_6h",
+    "event_descr_freq_last_24h",
+    "mcc_freq_last_1h",
+    "mcc_freq_last_6h",
+    "mcc_freq_last_24h",
+    "mcc_event_descr_pair_new",
+    "high_amount_ratio_last_24h",
+    "amount_relative_to_mcc_median_5_days",
 ]
 
 
@@ -277,7 +276,6 @@ def compute_features(
     is_new_device = 1.0 if (not _empty_str(os_c) or not _empty_str(dev_c)) and device_count_i == 0 else 0.0
     is_new_mcc = 1.0 if not _empty_str(mcc_c) and mcc_count_i == 0 else 0.0
     is_new_channel = 1.0 if (not _empty_str(ch_t) or not _empty_str(ch_s)) and channel_count_i == 0 else 0.0
-    is_new_timezone = 1.0 if not _empty_str(tz_c) and timezone_count_i == 0 else 0.0
     is_new_browser_language = 1.0 if not _empty_str(bl_c) and bl_count_i == 0 else 0.0
     is_new_device_tz_pair = (
         1.0
@@ -299,11 +297,6 @@ def compute_features(
         session_duration = float((sl - sf).total_seconds())
     else:
         session_duration = float("nan")
-
-    if not math.isnan(median) and median != 0.0:
-        amount_to_median = amount / median
-    else:
-        amount_to_median = float("nan")
 
     if not math.isnan(std) and std > 0.0 and not math.isnan(amount):
         amount_zscore = (amount - mean) / std
@@ -329,13 +322,6 @@ def compute_features(
     else:
         time_since_prev = float(tsp)
 
-    if last_amount is not None and math.isfinite(last_amount) and not math.isnan(amount):
-        amount_diff_prev = amount - last_amount
-        amount_ratio_prev = _safe_div(amount, last_amount)
-    else:
-        amount_diff_prev = float("nan")
-        amount_ratio_prev = float("nan")
-
     trend_mean_last_3_to_10 = (
         _safe_div(mean_last_3, mean_last_10)
         if (not math.isnan(mean_last_3) and not math.isnan(mean_last_10))
@@ -355,7 +341,6 @@ def compute_features(
     else:
         std_time_deltas = float("nan")
 
-    is_timezone_change = 1.0 if (not _empty_str(tz_c) and not _empty_str(last_tz) and tz_c != last_tz) else 0.0
     is_device_switch = 1.0 if (not _empty_str(os_c) or not _empty_str(dev_c)) and dkey_c != last_dkey else 0.0
     is_mcc_switch = 1.0 if not _empty_str(mcc_c) and not _empty_str(last_mcc) and mcc_c != last_mcc else 0.0
 
@@ -368,10 +353,8 @@ def compute_features(
     if len(last_k) >= 2:
         std_delta_last_k = float(statistics.stdev(last_k))
         mean_delta_last_k = float(statistics.mean(last_k))
-        cv_delta_last_k = _safe_div(std_delta_last_k, mean_delta_last_k)
     else:
         std_delta_last_k = float("nan")
-        cv_delta_last_k = float("nan")
 
     time_since_last_device_change = float("nan")
     time_since_last_mcc_change = float("nan")
@@ -409,6 +392,92 @@ def compute_features(
     sum_1h = sum_since(timedelta(hours=1))
     sum_24h = sum_since(timedelta(hours=24))
 
+    # Frequencies and pair novelty (depend on exact strings in window).
+    descr_c = "" if _empty_str(descr) else str(descr).strip()
+    mcc_c_s = "" if _empty_str(mcc_c) else str(mcc_c).strip()
+    if dttm is not None:
+        thr_1h = dttm - timedelta(hours=1)
+        thr_6h = dttm - timedelta(hours=6)
+        thr_24h = dttm - timedelta(hours=24)
+        thr_5d = dttm - timedelta(days=5)
+    else:
+        thr_1h = thr_6h = thr_24h = thr_5d = None
+
+    def _freq_last(thr: datetime | None, *, kind: str) -> float:
+        if thr is None:
+            return 0.0
+        if kind == "descr":
+            if not descr_c:
+                return 0.0
+            return float(
+                sum(
+                    1
+                    for t in window
+                    if t.dttm is not None and t.dttm >= thr and ("" if _empty_str(t.event_descr) else str(t.event_descr).strip()) == descr_c
+                )
+            )
+        if kind == "mcc":
+            if not mcc_c_s:
+                return 0.0
+            return float(
+                sum(
+                    1
+                    for t in window
+                    if t.dttm is not None and t.dttm >= thr and ("" if _empty_str(t.mcc) else str(t.mcc).strip()) == mcc_c_s
+                )
+            )
+        raise ValueError("unknown kind")
+
+    event_descr_freq_last_1h = _freq_last(thr_1h, kind="descr")
+    event_descr_freq_last_6h = _freq_last(thr_6h, kind="descr")
+    event_descr_freq_last_24h = _freq_last(thr_24h, kind="descr")
+    mcc_freq_last_1h = _freq_last(thr_1h, kind="mcc")
+    mcc_freq_last_6h = _freq_last(thr_6h, kind="mcc")
+    mcc_freq_last_24h = _freq_last(thr_24h, kind="mcc")
+
+    if descr_c and mcc_c_s:
+        seen_pair = any(
+            ("" if _empty_str(t.mcc) else str(t.mcc).strip()) == mcc_c_s
+            and ("" if _empty_str(t.event_descr) else str(t.event_descr).strip()) == descr_c
+            for t in window
+        )
+        mcc_event_descr_pair_new = 0.0 if seen_pair else 1.0
+    else:
+        mcc_event_descr_pair_new = 0.0
+
+    if thr_24h is None or math.isnan(p95):
+        high_amount_ratio_last_24h = 0.0
+    else:
+        recent_24h_amounts = [
+            t.amount
+            for t in window
+            if t.dttm is not None and t.dttm >= thr_24h and t.amount is not None and math.isfinite(t.amount)
+        ]
+        if not recent_24h_amounts:
+            high_amount_ratio_last_24h = 0.0
+        else:
+            high_amount_ratio_last_24h = float(sum(1 for a in recent_24h_amounts if a > p95)) / float(
+                len(recent_24h_amounts)
+            )
+
+    if thr_5d is None or not mcc_c_s or math.isnan(amount):
+        amount_relative_to_mcc_median_5_days = float("nan")
+    else:
+        mcc_amounts_5d = [
+            t.amount
+            for t in window
+            if t.dttm is not None
+            and t.dttm >= thr_5d
+            and t.amount is not None
+            and math.isfinite(t.amount)
+            and ("" if _empty_str(t.mcc) else str(t.mcc).strip()) == mcc_c_s
+        ]
+        if not mcc_amounts_5d:
+            amount_relative_to_mcc_median_5_days = float("nan")
+        else:
+            mcc_med_5d = float(statistics.median(mcc_amounts_5d))
+            amount_relative_to_mcc_median_5_days = amount / mcc_med_5d if mcc_med_5d != 0.0 else float("nan")
+
     cap = agg.window_transaction_cap
     if cap is None:
         tr_cap = float(tr_amount)
@@ -419,17 +488,14 @@ def compute_features(
     return {
         "operation_amt": amount,
         "log_1_plus_transactions_seen": log_1_plus_transactions_seen,
-        "amount_to_median": amount_to_median,
         "amount_zscore": amount_zscore,
         "is_amount_high": is_amount_high,
-        "transactions_last_1h": tx_1h,
         "transactions_last_24h": tx_24h,
         "sum_amount_last_1h": sum_1h,
         "max_amount_last_24h": max_amount_last_24h_feat,
         "is_new_device": is_new_device,
         "is_new_mcc": is_new_mcc,
         "is_new_channel": is_new_channel,
-        "is_new_timezone": is_new_timezone,
         "is_compromised_device": _compromised_binary(row.get("compromised")),
         "web_rdp_connection": _flag_nonempty(row.get("web_rdp_connection")),
         "phone_voip_call_state": _flag_nonempty(row.get("phone_voip_call_state")),
@@ -446,27 +512,29 @@ def compute_features(
         "tr_amount": tr_cap,
         "event_descr": cat_to_float(descr),
         "mcc_code": cat_to_float(mcc_c),
-        "amount_diff_prev": amount_diff_prev,
-        "amount_ratio_prev": amount_ratio_prev,
         "trend_mean_last_3_to_10": trend_mean_last_3_to_10,
         "amount_percentile_rank": amount_percentile_rank,
         "std_time_deltas": std_time_deltas,
-        "is_timezone_change": is_timezone_change,
         "is_new_device_tz_pair": is_new_device_tz_pair,
         "is_device_switch": is_device_switch,
         "is_mcc_switch": is_mcc_switch,
         "session_duration": session_duration,
         "session_mean_amount": session_mean_amount,
-        "amount_zscore_x_is_new_device": amount_zscore * is_new_device if not math.isnan(amount_zscore) else float("nan"),
-        "amount_zscore_x_is_new_mcc": amount_zscore * is_new_mcc if not math.isnan(amount_zscore) else float("nan"),
-        "is_new_device_x_is_new_timezone": is_new_device * is_new_timezone,
         "device_freq": _safe_div(float(device_count_i), float(len(window))) if len(window) > 0 else float("nan"),
         "delta_1": delta_1,
         "delta_2": delta_2,
         "delta_3": delta_3,
         "acceleration_delta_1_over_2": acceleration,
         "std_delta_last_k": std_delta_last_k,
-        "cv_delta_last_k": cv_delta_last_k,
         "time_since_last_device_change": time_since_last_device_change,
         "time_since_last_mcc_change": time_since_last_mcc_change,
+        "event_descr_freq_last_1h": event_descr_freq_last_1h,
+        "event_descr_freq_last_6h": event_descr_freq_last_6h,
+        "event_descr_freq_last_24h": event_descr_freq_last_24h,
+        "mcc_freq_last_1h": mcc_freq_last_1h,
+        "mcc_freq_last_6h": mcc_freq_last_6h,
+        "mcc_freq_last_24h": mcc_freq_last_24h,
+        "mcc_event_descr_pair_new": mcc_event_descr_pair_new,
+        "high_amount_ratio_last_24h": high_amount_ratio_last_24h,
+        "amount_relative_to_mcc_median_5_days": amount_relative_to_mcc_median_5_days,
     }

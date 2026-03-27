@@ -1,42 +1,38 @@
-Feature importance report — XGBoost (permutation on time-based val sample)
-Model: saved_model (/home/mants/Documents/own/guard-contest/output/model_xgb.json)
-Rows used: train=2000000, val=600000
+Feature importance report (permutation importance on time-based validation)
+Model: xgboost (loaded from /home/mants/Documents/own/guard-contest/output/model_xgb.json)
+Rows used: train=12000000, val=3600000
 Permutation repeats: 5
 
-TOP most important features (permutation):
- 1. sum_amount_last_24h: 0.00961643
- 2. event_descr: 0.00656395
- 3. max_amount_last_24h: 0.00627936
- 4. device_freq: 0.00376762
- 5. std_delta_last_k: 0.00325920
- 6. mcc_code: 0.00297485
- 7. operation_amt: 0.00278759
- 8. transactions_last_24h: 0.00275776
- 9. std_time_deltas: 0.00254553
-10. sum_amount_last_1h: 0.00215132
-11. time_since_last_device_change: 0.00198521
-12. delta_1: 0.00183829
-13. hour: 0.00181108
-14. delta_3: 0.00122996
-15. amount_percentile_rank: 0.00094809
+TOP most important features:
+ 1. event_descr: 0.00701671
+ 2. sum_amount_last_24h: 0.00603672
+ 3. operation_amt: 0.00423519
+ 4. device_freq: 0.00422493
+ 5. max_amount_last_24h: 0.00386340
+ 6. std_time_deltas: 0.00336062
+ 7. sum_amount_last_1h: 0.00282691
+ 8. amount_zscore: 0.00275085
+ 9. time_since_last_device_change: 0.00257875
+10. std_delta_last_k: 0.00248231
+11. mcc_code: 0.00246410
+12. high_amount_ratio_last_24h: 0.00245588
+13. hour: 0.00146809
+14. delta_2: 0.00112910
+15. time_since_prev_transaction: 0.00103554
 
-TOP least important features (permutation):
- 1. amount_diff_prev: -0.00092875
- 2. transactions_last_1h: -0.00050683
- 3. is_amount_high: -0.00041789
- 4. time_since_last_mcc_change: -0.00040061
- 5. trend_mean_last_3_to_10: -0.00015243
- 6. acceleration_delta_1_over_2: -0.00008311
- 7. amount_zscore_x_is_new_mcc: -0.00004470
- 8. delta_2: -0.00004445
- 9. amount_zscore_x_is_new_device: -0.00002827
-10. transactions_in_session: -0.00002417
-11. is_night_transaction: -0.00001974
-12. is_device_switch: -0.00001701
-13. is_timezone_change: -0.00001252
-14. is_new_mcc: -0.00000306
-15. is_new_device_x_is_new_timezone: -0.00000233
-
-Полное ранжирование всех признаков: feature_ranking_all.txt
-Нативные важности (CSV): xgb_native_importance.csv
-JSON (permutation + native): xgb_feature_importance.json
+TOP least important features:
+ 1. session_mean_amount: -0.00012965
+ 2. is_amount_high: -0.00007495
+ 3. tr_amount: 0.00000089
+ 4. is_new_browser_language: 0.00000152
+ 5. is_compromised_device: 0.00000249
+ 6. is_new_device_tz_pair: 0.00000277
+ 7. log_1_plus_transactions_seen: 0.00000583
+ 8. is_device_switch: 0.00000692
+ 9. is_night_transaction: 0.00000908
+10. is_weekend: 0.00001193
+11. is_new_channel: 0.00001431
+12. transactions_in_session: 0.00002013
+13. phone_voip_call_state: 0.00002967
+14. is_new_device: 0.00004675
+15. is_new_mcc: 0.00005452

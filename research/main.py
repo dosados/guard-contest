@@ -32,8 +32,14 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from shared.config import OUTPUT_DIR, TRAIN_DATASET_META_COLUMNS, TRAIN_DATASET_PATH, remap_sample_weight_from_dataset
-from training.config import VAL_RATIO, XGB_PARAMS
+from shared.config import (
+    MODEL_XGB_PATH,
+    OUTPUT_DIR,
+    TRAIN_DATASET_PATH,
+    remap_sample_weight_from_dataset,
+    resolve_model_input_columns,
+)
+from training.config import VAL_RATIO
 
 logger = logging.getLogger(__name__)
 matplotlib.use("Agg")
@@ -107,8 +113,7 @@ def _prepare_batch(dfb: pd.DataFrame, feature_cols: list[str]) -> tuple[np.ndarr
 def _detect_columns(path: Path) -> tuple[list[str], str]:
     pf = pq.ParquetFile(path)
     names = pf.schema_arrow.names
-    ignored_cols = {"target", "event_dttm", "sample_weight", "event_id", *TRAIN_DATASET_META_COLUMNS}
-    feature_cols = [name for name in names if name not in ignored_cols]
+    feature_cols = resolve_model_input_columns(names)
     if "event_dttm" not in names:
         raise ValueError("В датасете нет колонки event_dttm")
     if "target" not in names:
@@ -165,28 +170,30 @@ def _find_time_cutoff(path: Path, val_ratio: float, batch_size: int = 2_500_000)
     return _find_time_cutoff_paths([path], val_ratio=val_ratio, batch_size=batch_size)
 
 
-def _fit_xgb(x_train: np.ndarray, y_train: np.ndarray, w_train: np.ndarray, feature_cols: list[str]):
+def _load_xgb_booster(model_path: Path):
     import xgboost as xgb
 
-    params = {
-        "objective": "binary:logistic",
-        "eval_metric": "aucpr",
-        "eta": XGB_PARAMS.get("learning_rate", 0.05),
-        "max_depth": XGB_PARAMS.get("max_depth", 8),
-        "subsample": XGB_PARAMS.get("subsample", 0.8),
-        "colsample_bytree": XGB_PARAMS.get("colsample_bytree", 0.8),
-        "tree_method": XGB_PARAMS.get("tree_method", "hist"),
-        "seed": XGB_PARAMS.get("random_state", 42),
-    }
-    dtrain = xgb.DMatrix(x_train, label=y_train, weight=w_train, feature_names=feature_cols)
-    rounds = int(XGB_PARAMS.get("n_estimators", 600))
-    return xgb.train(params=params, dtrain=dtrain, num_boost_round=max(50, rounds))
+    booster = xgb.Booster()
+    booster.load_model(str(model_path))
+    return booster
 
 
 def _predict_proba(model, x: np.ndarray, feature_cols: list[str]) -> np.ndarray:
     import xgboost as xgb
 
     d = xgb.DMatrix(x, feature_names=feature_cols)
+    bi = getattr(model, "best_iteration", None)
+    if bi is not None and bi >= 0:
+        try:
+            return np.asarray(model.predict(d, iteration_range=(0, int(bi) + 1)), dtype=np.float32)
+        except TypeError:
+            pass
+    bnl = getattr(model, "best_ntree_limit", None)
+    if bnl is not None and bnl > 0:
+        try:
+            return np.asarray(model.predict(d, iteration_range=(0, int(bnl))), dtype=np.float32)
+        except TypeError:
+            return np.asarray(model.predict(d, ntree_limit=int(bnl)), dtype=np.float32)
     return np.asarray(model.predict(d), dtype=np.float32)
 
 
@@ -400,6 +407,12 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--max-memory-gb", type=float, default=20.0, help="Верхний предел RAM для процесса")
     parser.add_argument(
+        "--xgb-model-path",
+        type=Path,
+        default=MODEL_XGB_PATH,
+        help="Путь к обученной XGBoost-модели (по умолчанию output/model_xgb.json из training/main).",
+    )
+    parser.add_argument(
         "--memory-safety-factor",
         type=float,
         default=0.55,
@@ -412,7 +425,13 @@ def main() -> None:
             f"Не найден {TRAIN_DATASET_PATH}. "
             "Сначала соберите датасет: ./dataset_cpp/build/build_dataset ."
         )
+    if not args.xgb_model_path.exists():
+        raise FileNotFoundError(
+            f"Не найдена модель {args.xgb_model_path}. "
+            "Сначала обучите XGBoost: PYTHONPATH=. python training/main.py --xgb-config best"
+        )
     logger.info("Файл датасета: %s", TRAIN_DATASET_PATH)
+    logger.info("Файл XGBoost-модели: %s", args.xgb_model_path)
 
     if args.max_memory_gb <= 1.0:
         raise ValueError("--max-memory-gb должен быть > 1")
@@ -440,8 +459,8 @@ def main() -> None:
         random_seed=args.seed,
     )
 
-    logger.info("=== Обучение и importance: xgboost ===")
-    model = _fit_xgb(x_train, y_train, w_train, feature_cols)
+    logger.info("=== Permutation importance: xgboost (pretrained) ===")
+    model = _load_xgb_booster(args.xgb_model_path)
     baseline, importances = _compute_permutation_importance(
         model=model,
         x_val=x_val.copy(),
@@ -476,7 +495,7 @@ def main() -> None:
 
     lines = []
     lines.append("Feature importance report (permutation importance on time-based validation)")
-    lines.append("Model: xgboost")
+    lines.append(f"Model: xgboost (loaded from {args.xgb_model_path})")
     lines.append(f"Rows used: train={len(x_train)}, val={len(x_val)}")
     lines.append(f"Permutation repeats: {args.repeats}")
     lines.append("")

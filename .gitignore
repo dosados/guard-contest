@@ -16,6 +16,8 @@ catboost_info/
 # CMake / C++ out-of-tree build
 dataset_cpp/build/
 
+saves
+
 # output/: игнорируем тяжёлые датасеты и модели; графики (.png), отчёты (.md, .txt) и CSV в research/ — в репозитории
 output/full_dataset.parquet
 output/model_xgb.json

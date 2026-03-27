@@ -81,17 +81,14 @@ static void render_row_progress(int64_t done, int64_t total, const std::string& 
 static const char* kFeatureNames[] = {
     "operation_amt",
     "log_1_plus_transactions_seen",
-    "amount_to_median",
     "amount_zscore",
     "is_amount_high",
-    "transactions_last_1h",
     "transactions_last_24h",
     "sum_amount_last_1h",
     "max_amount_last_24h",
     "is_new_device",
     "is_new_mcc",
     "is_new_channel",
-    "is_new_timezone",
     "is_compromised_device",
     "web_rdp_connection",
     "phone_voip_call_state",
@@ -108,29 +105,31 @@ static const char* kFeatureNames[] = {
     "tr_amount",
     "event_descr",
     "mcc_code",
-    "amount_diff_prev",
-    "amount_ratio_prev",
     "trend_mean_last_3_to_10",
     "amount_percentile_rank",
     "std_time_deltas",
-    "is_timezone_change",
     "is_new_device_tz_pair",
     "is_device_switch",
     "is_mcc_switch",
     "session_duration",
     "session_mean_amount",
-    "amount_zscore_x_is_new_device",
-    "amount_zscore_x_is_new_mcc",
-    "is_new_device_x_is_new_timezone",
     "device_freq",
     "delta_1",
     "delta_2",
     "delta_3",
     "acceleration_delta_1_over_2",
     "std_delta_last_k",
-    "cv_delta_last_k",
     "time_since_last_device_change",
     "time_since_last_mcc_change",
+    "event_descr_freq_last_1h",
+    "event_descr_freq_last_6h",
+    "event_descr_freq_last_24h",
+    "mcc_freq_last_1h",
+    "mcc_freq_last_6h",
+    "mcc_freq_last_24h",
+    "mcc_event_descr_pair_new",
+    "high_amount_ratio_last_24h",
+    "amount_relative_to_mcc_median_5_days",
 };
 constexpr int kNumFeatures = sizeof(kFeatureNames) / sizeof(kFeatureNames[0]);
 
@@ -749,6 +748,100 @@ static FeatureRow compute_features(const UserWindow& w, int effective_target_len
   std::string sid_c = get_row_s("session_id");
   std::string descr = get_row_s("event_descr");
   if (descr.empty()) descr = get_row_s("event_desc");
+  std::string descr_trim = trim_copy(descr);
+  std::string mcc_trim = trim_copy(mcc_c);
+
+  // Frequencies of current event_descr / mcc_code in last 1h / 6h / 24h (relative to current dttm).
+  auto freq_descr_last = [&](std::chrono::seconds delta) -> double {
+    if (!dttm.has_value()) return 0.0;
+    if (descr_trim.empty()) return 0.0;
+    auto thr = *dttm - delta;
+    int c = 0;
+    for (int k = start; k < sz; ++k) {
+      const auto& t = w.dq[static_cast<size_t>(k)];
+      if (!t.dttm.has_value()) continue;
+      if (*t.dttm < thr) continue;
+      if (trim_copy(t.event_descr) == descr_trim) ++c;
+    }
+    return static_cast<double>(c);
+  };
+  auto freq_mcc_last = [&](std::chrono::seconds delta) -> double {
+    if (!dttm.has_value()) return 0.0;
+    if (mcc_trim.empty()) return 0.0;
+    auto thr = *dttm - delta;
+    int c = 0;
+    for (int k = start; k < sz; ++k) {
+      const auto& t = w.dq[static_cast<size_t>(k)];
+      if (!t.dttm.has_value()) continue;
+      if (*t.dttm < thr) continue;
+      if (trim_copy(t.mcc) == mcc_trim) ++c;
+    }
+    return static_cast<double>(c);
+  };
+
+  double event_descr_freq_last_1h = freq_descr_last(std::chrono::hours(1));
+  double event_descr_freq_last_6h = freq_descr_last(std::chrono::hours(6));
+  double event_descr_freq_last_24h = freq_descr_last(std::chrono::hours(24));
+  double mcc_freq_last_1h = freq_mcc_last(std::chrono::hours(1));
+  double mcc_freq_last_6h = freq_mcc_last(std::chrono::hours(6));
+  double mcc_freq_last_24h = freq_mcc_last(std::chrono::hours(24));
+
+  // Pair novelty: 1 if (mcc, event_descr) was never seen before in the window suffix.
+  double mcc_event_descr_pair_new = 0.0;
+  if (!mcc_trim.empty() && !descr_trim.empty()) {
+    bool seen = false;
+    for (int k = start; k < sz; ++k) {
+      const auto& t = w.dq[static_cast<size_t>(k)];
+      if (trim_copy(t.mcc) == mcc_trim && trim_copy(t.event_descr) == descr_trim) {
+        seen = true;
+        break;
+      }
+    }
+    mcc_event_descr_pair_new = seen ? 0.0 : 1.0;
+  }
+
+  // Ratio of "high amount" transactions (> p95) among last 24h transactions.
+  double high_amount_ratio_last_24h = 0.0;
+  if (std::isfinite(p95) && dttm.has_value()) {
+    int cnt_recent = 0;
+    int cnt_high = 0;
+    auto thr = *dttm - std::chrono::hours(24);
+    for (int k = start; k < sz; ++k) {
+      const auto& t = w.dq[static_cast<size_t>(k)];
+      if (!t.dttm.has_value()) continue;
+      if (*t.dttm < thr) continue;
+      if (!t.amount.has_value() || !std::isfinite(*t.amount)) continue;
+      ++cnt_recent;
+      if (*t.amount > p95) ++cnt_high;
+    }
+    if (cnt_recent > 0) high_amount_ratio_last_24h = static_cast<double>(cnt_high) / static_cast<double>(cnt_recent);
+  }
+
+  // Current amount relative to median amount for same mcc in last 5 days.
+  double amount_relative_to_mcc_median_5_days = nan_val();
+  if (dttm.has_value() && std::isfinite(amount) && !mcc_trim.empty()) {
+    auto thr = *dttm - std::chrono::hours(24 * 5);
+    std::vector<double> mcc_amounts;
+    for (int k = start; k < sz; ++k) {
+      const auto& t = w.dq[static_cast<size_t>(k)];
+      if (!t.dttm.has_value()) continue;
+      if (*t.dttm < thr) continue;
+      if (!t.amount.has_value() || !std::isfinite(*t.amount)) continue;
+      if (trim_copy(t.mcc) != mcc_trim) continue;
+      mcc_amounts.push_back(*t.amount);
+    }
+    if (!mcc_amounts.empty()) {
+      std::sort(mcc_amounts.begin(), mcc_amounts.end());
+      size_t n = mcc_amounts.size();
+      double med = nan_val();
+      if (n % 2 == 1) {
+        med = mcc_amounts[n / 2];
+      } else {
+        med = (mcc_amounts[n / 2 - 1] + mcc_amounts[n / 2]) / 2.0;
+      }
+      if (std::isfinite(med) && med != 0.0) amount_relative_to_mcc_median_5_days = amount / med;
+    }
+  }
 
   std::string dkey_c = os_c + "\x1f" + dev_c;
   std::string ckey_c = ch_t + "\x1f" + ch_s;
@@ -942,17 +1035,14 @@ static FeatureRow compute_features(const UserWindow& w, int effective_target_len
   auto put = [&](double v) { out.f[fi++] = v; };
   put(amount);
   put(log_1p_tx);
-  put(amount_to_median);
   put(amount_zscore);
   put(is_amount_high);
-  put(tx_1h);
   put(tx_24h);
   put(sum_1h);
   put(max_amount_feat);
   put(is_new_device);
   put(is_new_mcc);
   put(is_new_channel);
-  put(is_new_timezone);
   put(compromised_flag);
   put(empty_field(get_row_s("web_rdp_connection")) ? 0.0 : 1.0);
   put(empty_field(get_row_s("phone_voip_call_state")) ? 0.0 : 1.0);
@@ -969,29 +1059,31 @@ static FeatureRow compute_features(const UserWindow& w, int effective_target_len
   put(tr_am);
   put(cat_from_utf8(descr));
   put(cat_from_utf8(mcc_c));
-  put(amount_diff_prev);
-  put(amount_ratio_prev);
   put(trend_mean_last_3_to_10);
   put(amount_percentile_rank);
   put(std_time_deltas);
-  put(is_timezone_change);
   put(is_new_device_tz_pair);
   put(is_device_switch);
   put(is_mcc_switch);
   put(session_duration);
   put(session_mean_amount);
-  put(std::isfinite(amount_zscore) ? (amount_zscore * is_new_device) : nan_val());
-  put(std::isfinite(amount_zscore) ? (amount_zscore * is_new_mcc) : nan_val());
-  put(is_new_device * is_new_timezone);
   put((eff > 0) ? (static_cast<double>(device_count_i) / static_cast<double>(eff)) : nan_val());
   put(delta_1);
   put(delta_2);
   put(delta_3);
   put(acceleration);
   put(std_delta_last_k);
-  put(cv_delta_last_k);
   put(time_since_last_device_change);
   put(time_since_last_mcc_change);
+  put(event_descr_freq_last_1h);
+  put(event_descr_freq_last_6h);
+  put(event_descr_freq_last_24h);
+  put(mcc_freq_last_1h);
+  put(mcc_freq_last_6h);
+  put(mcc_freq_last_24h);
+  put(mcc_event_descr_pair_new);
+  put(high_amount_ratio_last_24h);
+  put(amount_relative_to_mcc_median_5_days);
   if (fi != kNumFeatures) {
     throw std::runtime_error("feature vector size mismatch");
   }

@@ -2,8 +2,8 @@
 
 ## Setup
 - Model: `xgboost`
-- Train rows used: `2000000`
-- Validation rows used: `600000`
+- Train rows used: `12000000`
+- Validation rows used: `3600000`
 - Permutation repeats: `5`
 - Memory budget target: `20.0 GB`
 
@@ -18,38 +18,38 @@
 - Least important: `least_features.png`
 
 ## Top most important features
-1. `sum_amount_last_24h`: `0.00129731`
-2. `amount_to_median`: `0.00085639`
-3. `std_delta_last_k`: `0.00079093`
-4. `time_since_prev_transaction`: `0.00076716`
-5. `event_descr`: `0.00066358`
-6. `transactions_last_24h`: `0.00060716`
-7. `device_freq`: `0.00058613`
-8. `mcc_code`: `0.00057618`
-9. `delta_1`: `0.00038202`
-10. `sum_amount_last_1h`: `0.00022234`
-11. `operation_amt`: `0.00022183`
-12. `amount_zscore`: `0.00012700`
-13. `delta_3`: `0.00010039`
-14. `amount_zscore_x_is_new_mcc`: `0.00008965`
-15. `session_duration`: `0.00008590`
+1. `event_descr`: `0.00701671`
+2. `sum_amount_last_24h`: `0.00603672`
+3. `operation_amt`: `0.00423519`
+4. `device_freq`: `0.00422493`
+5. `max_amount_last_24h`: `0.00386340`
+6. `std_time_deltas`: `0.00336062`
+7. `sum_amount_last_1h`: `0.00282691`
+8. `amount_zscore`: `0.00275085`
+9. `time_since_last_device_change`: `0.00257875`
+10. `std_delta_last_k`: `0.00248231`
+11. `mcc_code`: `0.00246410`
+12. `high_amount_ratio_last_24h`: `0.00245588`
+13. `hour`: `0.00146809`
+14. `delta_2`: `0.00112910`
+15. `time_since_prev_transaction`: `0.00103554`
 
 ## Top least important features
-1. `amount_ratio_prev`: `-0.00019080`
-2. `max_amount_last_24h`: `-0.00018395`
-3. `day_of_week`: `-0.00017389`
-4. `tr_amount`: `-0.00010841`
-5. `transactions_last_1h`: `-0.00010369`
-6. `trend_mean_last_3_to_10`: `-0.00009295`
-7. `session_mean_amount`: `-0.00008701`
-8. `time_since_last_device_change`: `-0.00008366`
-9. `amount_diff_prev`: `-0.00007729`
-10. `log_1_plus_transactions_seen`: `-0.00007686`
-11. `cv_delta_last_k`: `-0.00006024`
-12. `timezone_missing`: `-0.00002073`
-13. `phone_voip_call_state`: `-0.00001802`
-14. `is_device_switch`: `-0.00001203`
-15. `is_amount_high`: `-0.00000950`
+1. `session_mean_amount`: `-0.00012965`
+2. `is_amount_high`: `-0.00007495`
+3. `tr_amount`: `0.00000089`
+4. `is_new_browser_language`: `0.00000152`
+5. `is_compromised_device`: `0.00000249`
+6. `is_new_device_tz_pair`: `0.00000277`
+7. `log_1_plus_transactions_seen`: `0.00000583`
+8. `is_device_switch`: `0.00000692`
+9. `is_night_transaction`: `0.00000908`
+10. `is_weekend`: `0.00001193`
+11. `is_new_channel`: `0.00001431`
+12. `transactions_in_session`: `0.00002013`
+13. `phone_voip_call_state`: `0.00002967`
+14. `is_new_device`: `0.00004675`
+15. `is_new_mcc`: `0.00005452`
 
 ## Practical interpretation
 - Keep top features as priority signals in future iterations.
