@@ -6,8 +6,8 @@
     "colsample_bytree": 0.8,
     "min_child_weight": 7,
     "gamma": 5.0,
-    "reg_alpha": 0.1,
+    "reg_alpha": 0.0,
     "reg_lambda": 5.0
   },
-  "pr_auc_val": 0.009820305736879231
+  "pr_auc_val": 0.12200829267335585
 }

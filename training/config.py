@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from typing import Any
 
 # Список признаков на вход модели: shared.config.MODEL_INPUT_FEATURES (все FEATURE_NAMES).
 
@@ -16,6 +17,20 @@ RANDOM_SEED = 42
 
 GRID_SEARCH_DIR = Path(__file__).resolve().parent / "grid_search"
 XGB_BEST_PARAMS_PATH = GRID_SEARCH_DIR / "xgb_best_params.json"
+
+# Единственное место, где задаётся сетка гиперпараметров для полного перебора
+# (training/xgb_grid_search.py). Ключи — те же, что использует training/main._build_xgb_train_params
+# (через XGB_MODEL_HYPERPARAMS после сохранения лучшего JSON).
+XGB_PARAM_GRID: dict[str, list[Any]] = {
+    "learning_rate": [0.05],
+    "max_depth": [6],
+    "subsample": [0.9],
+    "colsample_bytree": [0.8],
+    "min_child_weight": [7, 9],
+    "gamma": [1.0, 5.0],
+    "reg_alpha": [0.0, 0.1],
+    "reg_lambda": [5.0],
+}
 
 CATBOOST_PARAMS = {
     "iterations": 800,
@@ -52,6 +67,10 @@ def _load_xgb_hyperparams_from_grid_search() -> dict[str, float | int]:
         "max_depth": int(XGB_PARAMS["max_depth"]),
         "subsample": float(XGB_PARAMS["subsample"]),
         "colsample_bytree": float(XGB_PARAMS["colsample_bytree"]),
+        "min_child_weight": float(XGB_PARAMS.get("min_child_weight", 1.0)),
+        "gamma": float(XGB_PARAMS.get("gamma", 0.0)),
+        "reg_alpha": float(XGB_PARAMS.get("reg_alpha", 0.0)),
+        "reg_lambda": float(XGB_PARAMS.get("reg_lambda", 1.0)),
     }
     if not XGB_BEST_PARAMS_PATH.exists():
         return defaults
@@ -63,6 +82,10 @@ def _load_xgb_hyperparams_from_grid_search() -> dict[str, float | int]:
             "max_depth": int(hp.get("max_depth", defaults["max_depth"])),
             "subsample": float(hp.get("subsample", defaults["subsample"])),
             "colsample_bytree": float(hp.get("colsample_bytree", defaults["colsample_bytree"])),
+            "min_child_weight": float(hp.get("min_child_weight", defaults["min_child_weight"])),
+            "gamma": float(hp.get("gamma", defaults["gamma"])),
+            "reg_alpha": float(hp.get("reg_alpha", defaults["reg_alpha"])),
+            "reg_lambda": float(hp.get("reg_lambda", defaults["reg_lambda"])),
         }
     except Exception as exc:
         logger.warning("Не удалось прочитать %s: %s", XGB_BEST_PARAMS_PATH, exc)

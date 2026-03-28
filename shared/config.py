@@ -67,10 +67,15 @@ def remap_sample_weight_from_dataset(weights: np.ndarray) -> np.ndarray:
 # Обучение
 MODEL_PATH = OUTPUT_DIR / "model.cbm"
 MODEL_XGB_PATH = OUTPUT_DIR / "model_xgb.json"
+MODEL_XGB_LOW_TR_AMOUNT_PATH = OUTPUT_DIR / "model_xgb_tr_amount_le_30.json"
+MODEL_XGB_HIGH_TR_AMOUNT_PATH = OUTPUT_DIR / "model_xgb_tr_amount_gt_30.json"
 MODEL_LGB_PATH = OUTPUT_DIR / "model_lgb.txt"
 MODEL_RF_PATH = OUTPUT_DIR / "model_rf.joblib"
 MODEL_LR_PATH = OUTPUT_DIR / "model_lr.joblib"
+MODEL_LR_BOOST_STACK_PATH = OUTPUT_DIR / "model_lr_boost_stack.joblib"
 MODEL_TORCH_PATH = OUTPUT_DIR / "weights" / "model_torch.pt"
+# Табличный MLP по full_dataset (все MODEL_INPUT_FEATURES → logit); чекпоинт с impute-средними по train.
+MODEL_TORCH_MLP_PATH = OUTPUT_DIR / "weights" / "model_torch_mlp.pt"
 
 # Все фичи датасета в порядке FEATURE_NAMES (обучение и submission).
 MODEL_INPUT_FEATURES: list[str] = list(FEATURE_NAMES)

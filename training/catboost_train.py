@@ -20,7 +20,7 @@ import pyarrow.parquet as pq
 from sklearn.metrics import average_precision_score
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(_PROJECT_ROOT) not in sys.path:
+if str(_PROJECT_ROOT) not in sys.path:  
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from catboost import CatBoostClassifier, Pool
@@ -32,6 +32,7 @@ from training.config import (
     XGB_EARLY_STOPPING_ROUNDS,
     XGB_EXTERNAL_PARQUET_BATCH_ROWS,
 )
+from training.catboost_tsv_cpp import export_train_val_tsv
 from training.main import _count_val_rows, _detect_columns, _find_time_cutoff, _prepare_batch, _rm_tree
 
 logger = logging.getLogger(__name__)
@@ -231,6 +232,17 @@ def main() -> None:
         action="store_true",
         help="создавать val Pool целиком и использовать eval_set в fit (требует больше RAM)",
     )
+    parser.add_argument(
+        "--no-cpp",
+        action="store_true",
+        help="не вызывать C++ parquet_to_catboost_tsv, только Python",
+    )
+    parser.add_argument(
+        "--cpp-threads",
+        type=int,
+        default=0,
+        help="потоки C++-экспортёра (0 — авто)",
+    )
     args = parser.parse_args()
 
     batch_rows = int(args.batch_rows if args.batch_rows is not None else XGB_EXTERNAL_PARQUET_BATCH_ROWS)
@@ -245,27 +257,35 @@ def main() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     cutoff_day = _find_time_cutoff(TRAIN_DATASET_PATH, VAL_RATIO)
 
-    cache_dir = OUTPUT_DIR / "catboost_tsv_cache"
+    cache_dir = OUTPUT_DIR / "cat_train_tsv_cache"
     _rm_tree(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     train_tsv = cache_dir / "train.tsv"
     val_tsv = cache_dir / "val.tsv"
     cd_path = cache_dir / "column_description.cd"
 
-    logger.info("Один проход parquet → TSV (batch_rows=%d), cutoff=%s …", batch_rows, cutoff_day.date())
+    logger.info("Один проход parquet → TSV, cutoff=%s …", cutoff_day.date())
     _write_column_description(cd_path, feature_cols)
-    _stream_parquet_to_tsv_splits(
+    export_train_val_tsv(
         TRAIN_DATASET_PATH,
+        train_tsv,
+        val_tsv,
         feature_cols,
         dttm_col,
         cutoff_day,
         batch_rows,
-        train_tsv,
-        val_tsv,
+        prefer_cpp=not args.no_cpp,
+        cpp_threads=args.cpp_threads,
     )
 
-    logger.info("Подсчёт val-строк (одна колонка event_dttm) …")
-    n_val = _count_val_rows(TRAIN_DATASET_PATH, dttm_col, cutoff_day, batch_size=batch_rows)
+    logger.info("Подсчёт val-строк по time split (event_dttm, без сегмента по tr_amount) …")
+    n_val = _count_val_rows(
+        TRAIN_DATASET_PATH,
+        dttm_col,
+        cutoff_day,
+        "tr_amount",
+        batch_size=batch_rows,
+    )
     logger.info("Val rows (оценка по time split): %d", n_val)
 
     try:

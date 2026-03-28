@@ -1,7 +1,7 @@
 // Сборка обучающего датасета: Arrow + Parquet + OpenSSL (MD5).
 // Train: каждая строка с непустым customer_id → строка в датасет → update окна.
-// История: deque не длиннее kWindowCap; фичи — по суффиксу длины min(stored, W), где W ~ дискретное
-// на {kWindowMinSample..kWindowCap}: P(W=101) максимальна, с ростом W вероятность убывает (веса exp(-β·(W-101))).
+// История: deque не длиннее kWindowCap; фичи — по суффиксу длины min(stored, W),
+// где W сэмплируется из эмпирического распределения "транзакций на пользователя" из data/test/pretest.parquet.
 // target = 1 если event_id в train_labels.parquet, иначе 0.
 // Запуск из корня репозитория: ./build_dataset [repo_root]
 
@@ -39,12 +39,8 @@
 #include <unordered_set>
 #include <vector>
 
-/** Максимум транзакций в deque и верхняя граница сэмпла эффективного окна. */
-constexpr int kWindowCap = 150;
-/** Нижняя граница сэмпла: итоговое окно не меньше этого, если в deque уже столько есть (иначе — весь stored). */
-constexpr int kWindowMinSample = 101;
-/** Шаг дискретного распределения: вес размера (101+k) ∝ exp(-kWindowWeightBeta * k). */
-constexpr double kWindowWeightBeta = 0.12;
+/** Максимум транзакций в deque и верхняя граница активного окна. */
+constexpr int kWindowCap = 512;
 constexpr int kOutBatch = 131072;
 constexpr double kWeightUnlabeled = 1.0;
 constexpr double kWeightLabeled0 = 2.0;
@@ -103,6 +99,7 @@ static const char* kFeatureNames[] = {
     "transactions_in_session",
     "timezone_missing",
     "tr_amount",
+    "event_type_nm",
     "event_descr",
     "mcc_code",
     "trend_mean_last_3_to_10",
@@ -124,6 +121,9 @@ static const char* kFeatureNames[] = {
     "event_descr_freq_last_1h",
     "event_descr_freq_last_6h",
     "event_descr_freq_last_24h",
+    "event_type_nm_freq_last_1h",
+    "event_type_nm_freq_last_6h",
+    "event_type_nm_freq_last_24h",
     "mcc_freq_last_1h",
     "mcc_freq_last_6h",
     "mcc_freq_last_24h",
@@ -175,34 +175,24 @@ static uint64_t hash_event_customer(int64_t event_id, const std::string& custome
   return h;
 }
 
-/** Целевой размер эффективного окна (до min со stored): всегда в [kWindowMinSample, kWindowCap]. */
-static int sample_effective_window_target(int64_t event_id, const std::string& customer_id) {
-  constexpr int span = kWindowCap - kWindowMinSample + 1;
-  static std::array<double, static_cast<size_t>(span)> w{};
-  static double weight_sum = 0.0;
-  static bool weights_ready = false;
-  if (!weights_ready) {
-    double s = 0.0;
-    for (int k = 0; k < span; ++k) {
-      w[static_cast<size_t>(k)] = std::exp(-kWindowWeightBeta * static_cast<double>(k));
-      s += w[static_cast<size_t>(k)];
-    }
-    weight_sum = s;
-    weights_ready = true;
+struct WindowTargetSampler {
+  std::vector<int> values;
+  std::vector<double> cdf;
+
+  bool empty() const { return values.empty() || cdf.empty(); }
+
+  int sample(int64_t event_id, const std::string& customer_id) const {
+    if (empty()) return 1;
+    uint64_t h = hash_event_customer(event_id, customer_id);
+    uint64_t h2 = mix64(h ^ 0xD6E8FEB866B13AD5ULL);
+    constexpr uint64_t kDenom = (1ULL << 53) - 1ULL;
+    const double u = static_cast<double>(h2 & kDenom) / static_cast<double>(kDenom);
+    auto it = std::lower_bound(cdf.begin(), cdf.end(), u);
+    if (it == cdf.end()) return values.back();
+    const size_t idx = static_cast<size_t>(std::distance(cdf.begin(), it));
+    return values[idx];
   }
-  uint64_t h = hash_event_customer(event_id, customer_id);
-  uint64_t h2 = mix64(h ^ 0xD6E8FEB866B13AD5ULL);
-  constexpr uint64_t kDenom = (1ULL << 53) - 1ULL;
-  double u = static_cast<double>(h2 & kDenom) / static_cast<double>(kDenom);
-  if (u <= 0.0) u = 1e-15;
-  double r = u * weight_sum;
-  double acc = 0.0;
-  for (int k = 0; k < span; ++k) {
-    acc += w[static_cast<size_t>(k)];
-    if (r <= acc) return kWindowMinSample + k;
-  }
-  return kWindowCap;
-}
+};
 
 static std::string trim_copy(std::string s) {
   while (!s.empty() && (s.front() == ' ' || s.front() == '\t')) s.erase(s.begin());
@@ -446,7 +436,7 @@ static const SchemaColumnSpec kTrainParquetColumns[] = {
     {"phone_voip_call_state", false, ColTypeExpect::kText},
     {"session_id", false, ColTypeExpect::kText},
     {"browser_language", false, ColTypeExpect::kText},
-    {"event_type_nm", false, ColTypeExpect::kText},
+    {"event_type_nm", false, ColTypeExpect::kAmount},
     {"event_descr", false, ColTypeExpect::kText},
     {"event_desc", false, ColTypeExpect::kText},
 };
@@ -539,6 +529,14 @@ static Txn row_to_txn(const arrow::RecordBatch& batch, int64_t i, const arrow::S
   t.session_id = get_s("session_id");
   t.browser_language = get_s("browser_language");
   t.event_type_nm = get_s("event_type_nm");
+  if (t.event_type_nm.empty()) {
+    int et_idx = col_index(sch, "event_type_nm");
+    if (et_idx >= 0) {
+      if (auto p = col_get_optional_double(*batch.column(et_idx), i)) {
+        t.event_type_nm = std::to_string(*p);
+      }
+    }
+  }
   t.event_descr = get_s("event_descr");
   if (t.event_descr.empty()) t.event_descr = get_s("event_desc");
   return t;
@@ -748,6 +746,18 @@ static FeatureRow compute_features(const UserWindow& w, int effective_target_len
   std::string sid_c = get_row_s("session_id");
   std::string descr = get_row_s("event_descr");
   if (descr.empty()) descr = get_row_s("event_desc");
+  double event_type_nm_feat = nan_val();
+  {
+    int et_idx = col_index(sch, "event_type_nm");
+    if (et_idx >= 0) {
+      const auto& et_col = *batch.column(et_idx);
+      if (auto p = col_get_optional_double(et_col, i)) {
+        if (std::isfinite(*p)) event_type_nm_feat = *p;
+      } else if (auto p2 = parse_double_any(trim_copy(col_get_str(et_col, i)))) {
+        if (std::isfinite(*p2)) event_type_nm_feat = *p2;
+      }
+    }
+  }
   std::string descr_trim = trim_copy(descr);
   std::string mcc_trim = trim_copy(mcc_c);
 
@@ -778,10 +788,29 @@ static FeatureRow compute_features(const UserWindow& w, int effective_target_len
     }
     return static_cast<double>(c);
   };
+  auto freq_event_type_nm_last = [&](std::chrono::seconds delta) -> double {
+    if (!dttm.has_value()) return 0.0;
+    if (!std::isfinite(event_type_nm_feat)) return 0.0;
+    const double target = event_type_nm_feat;
+    auto thr = *dttm - delta;
+    int c = 0;
+    for (int k = start; k < sz; ++k) {
+      const auto& t = w.dq[static_cast<size_t>(k)];
+      if (!t.dttm.has_value()) continue;
+      if (*t.dttm < thr) continue;
+      if (auto p = parse_double_any(trim_copy(t.event_type_nm))) {
+        if (std::isfinite(*p) && *p == target) ++c;
+      }
+    }
+    return static_cast<double>(c);
+  };
 
   double event_descr_freq_last_1h = freq_descr_last(std::chrono::hours(1));
   double event_descr_freq_last_6h = freq_descr_last(std::chrono::hours(6));
   double event_descr_freq_last_24h = freq_descr_last(std::chrono::hours(24));
+  double event_type_nm_freq_last_1h = freq_event_type_nm_last(std::chrono::hours(1));
+  double event_type_nm_freq_last_6h = freq_event_type_nm_last(std::chrono::hours(6));
+  double event_type_nm_freq_last_24h = freq_event_type_nm_last(std::chrono::hours(24));
   double mcc_freq_last_1h = freq_mcc_last(std::chrono::hours(1));
   double mcc_freq_last_6h = freq_mcc_last(std::chrono::hours(6));
   double mcc_freq_last_24h = freq_mcc_last(std::chrono::hours(24));
@@ -1057,6 +1086,7 @@ static FeatureRow compute_features(const UserWindow& w, int effective_target_len
   put(static_cast<double>(n_sess + 1));
   put(empty_field(tz_c) ? 1.0 : 0.0);
   put(tr_am);
+  put(event_type_nm_feat);
   put(cat_from_utf8(descr));
   put(cat_from_utf8(mcc_c));
   put(trend_mean_last_3_to_10);
@@ -1078,6 +1108,9 @@ static FeatureRow compute_features(const UserWindow& w, int effective_target_len
   put(event_descr_freq_last_1h);
   put(event_descr_freq_last_6h);
   put(event_descr_freq_last_24h);
+  put(event_type_nm_freq_last_1h);
+  put(event_type_nm_freq_last_6h);
+  put(event_type_nm_freq_last_24h);
   put(mcc_freq_last_1h);
   put(mcc_freq_last_6h);
   put(mcc_freq_last_24h);
@@ -1226,9 +1259,80 @@ class DatasetWriter {
   int64_t rows_written_ = 0;
 };
 
+static arrow::Result<WindowTargetSampler> build_sampler_from_pretest(const std::string& pretest_path) {
+  WindowTargetSampler sampler;
+  std::ifstream check(pretest_path);
+  if (!check.good()) {
+    log_msg("pretest not found, fallback sampler will be used: " + pretest_path);
+    sampler.values = {1};
+    sampler.cdf = {1.0};
+    return sampler;
+  }
+
+  arrow::MemoryPool* pool = arrow::default_memory_pool();
+  ARROW_ASSIGN_OR_RAISE(auto infile, arrow::io::ReadableFile::Open(pretest_path));
+  ARROW_ASSIGN_OR_RAISE(auto reader, parquet::arrow::OpenFile(infile, pool));
+  ARROW_ASSIGN_OR_RAISE(auto rb, reader->GetRecordBatchReader());
+
+  std::unordered_map<std::string, int64_t> user_counts;
+  while (true) {
+    ARROW_ASSIGN_OR_RAISE(auto batch_ptr, rb->Next());
+    if (!batch_ptr) break;
+    const arrow::RecordBatch& batch = *batch_ptr;
+    int cidx = col_index(*batch.schema(), "customer_id");
+    if (cidx < 0) {
+      return arrow::Status::Invalid("pretest parquet has no customer_id: ", pretest_path);
+    }
+    const auto& col_c = *batch.column(cidx);
+    const int64_t n = batch.num_rows();
+    for (int64_t i = 0; i < n; ++i) {
+      std::string ck = col_get_str(col_c, i);
+      if (ck.empty()) continue;
+      user_counts[ck] += 1;
+    }
+  }
+
+  if (user_counts.empty()) {
+    return arrow::Status::Invalid("no non-empty customer_id values in pretest: ", pretest_path);
+  }
+
+  std::unordered_map<int, int64_t> hist;
+  for (const auto& kv : user_counts) {
+    int capped = static_cast<int>(std::min<int64_t>(kv.second, static_cast<int64_t>(kWindowCap)));
+    if (capped <= 0) continue;
+    hist[capped] += 1;
+  }
+  if (hist.empty()) {
+    return arrow::Status::Invalid("failed to build transaction-count histogram from pretest: ", pretest_path);
+  }
+
+  std::vector<std::pair<int, int64_t>> bins(hist.begin(), hist.end());
+  std::sort(bins.begin(), bins.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+
+  int64_t total = 0;
+  for (const auto& b : bins) total += b.second;
+  if (total <= 0) {
+    return arrow::Status::Invalid("invalid histogram total for pretest sampler: ", pretest_path);
+  }
+
+  sampler.values.reserve(bins.size());
+  sampler.cdf.reserve(bins.size());
+  double acc = 0.0;
+  for (const auto& b : bins) {
+    acc += static_cast<double>(b.second) / static_cast<double>(total);
+    sampler.values.push_back(b.first);
+    sampler.cdf.push_back(acc);
+  }
+  sampler.cdf.back() = 1.0;
+  log_msg("pretest sampler ready: users=" + std::to_string(user_counts.size()) +
+          " bins=" + std::to_string(sampler.values.size()) + " cap=" + std::to_string(kWindowCap));
+  return sampler;
+}
+
 static arrow::Status process_file(const std::string& path, bool is_train,
                                   std::unordered_map<std::string, UserWindow>* win_map,
-                                  const std::unordered_map<int64_t, int>& labels, DatasetWriter* wr) {
+                                  const std::unordered_map<int64_t, int>& labels, const WindowTargetSampler& sampler,
+                                  DatasetWriter* wr) {
   arrow::MemoryPool* pool = arrow::default_memory_pool();
   ARROW_ASSIGN_OR_RAISE(auto infile, arrow::io::ReadableFile::Open(path));
   ARROW_ASSIGN_OR_RAISE(auto reader, parquet::arrow::OpenFile(infile, pool));
@@ -1264,7 +1368,7 @@ static arrow::Status process_file(const std::string& path, bool is_train,
         if (eidx >= 0) {
           if (auto p = col_get_int64(*batch.column(eidx), i)) eid_row = *p;
         }
-        int target_len = sample_effective_window_target(eid_row, ck);
+        int target_len = sampler.sample(eid_row, ck);
         FeatureRow fr = compute_features(w, target_len, batch, i, sch, labels);
         fr.customer_id = ck;
         ARROW_RETURN_NOT_OK(wr->append(fr));
@@ -1283,7 +1387,9 @@ int main(int argc, char** argv) {
   std::string root = ".";
   if (argc >= 2) root = argv[1];
   std::string data_train = root + "/data/train/";
+  std::string data_test = root + "/data/test/";
   std::string labels_path = root + "/data/train_labels.parquet";
+  std::string pretest_path = data_test + "pretest.parquet";
   std::string out_dir = root + "/output/";
   std::string out_path = out_dir + "full_dataset.parquet";
 
@@ -1317,6 +1423,13 @@ int main(int argc, char** argv) {
   }
   log_msg("labels event_ids=" + std::to_string(labels_orig.size()) + " path=" + labels_path);
 
+  auto sampler_res = build_sampler_from_pretest(pretest_path);
+  if (!sampler_res.ok()) {
+    std::cerr << "[build_dataset] Failed to build pretest sampler: " << sampler_res.status().ToString() << "\n";
+    return 1;
+  }
+  WindowTargetSampler sampler = std::move(sampler_res.ValueOrDie());
+
   DatasetWriter wr(out_path);
   std::unordered_map<std::string, UserWindow> windows;
 
@@ -1327,7 +1440,7 @@ int main(int argc, char** argv) {
       log_msg("skip missing: " + p);
       continue;
     }
-    auto st = process_file(p, false, &windows, labels_orig, &wr);
+    auto st = process_file(p, false, &windows, labels_orig, sampler, &wr);
     if (!st.ok()) {
       std::cerr << "[build_dataset] " << st.ToString() << "\n";
       return 1;
@@ -1340,7 +1453,7 @@ int main(int argc, char** argv) {
       log_msg("skip missing: " + p);
       continue;
     }
-    auto st = process_file(p, true, &windows, labels_orig, &wr);
+    auto st = process_file(p, true, &windows, labels_orig, sampler, &wr);
     if (!st.ok()) {
       std::cerr << "[build_dataset] " << st.ToString() << "\n";
       return 1;

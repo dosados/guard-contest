@@ -3,9 +3,9 @@ Permutation importance по train-датасету для XGBoost.
 
 Датасет: используется только `output/full_dataset.parquet`.
 
-Признаки определяются динамически из parquet: берутся все колонки кроме служебных
-(`target`, `event_dttm`, `sample_weight`, `event_id`, `customer_id`).
-Это позволяет автоматически работать с актуальным состоянием датасета.
+Признаки берутся через `shared.config.resolve_model_input_columns`, то есть
+строго по `shared.features.FEATURE_NAMES` (в актуальном порядке).
+Это автоматически подхватывает новые фичи после пересборки датасета.
 
 Важность: permutation importance на временной валидации:
 importance = baseline_pr_auc - pr_auc_after_shuffle(feature)

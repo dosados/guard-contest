@@ -15,16 +15,30 @@ catboost_info/
 
 # CMake / C++ out-of-tree build
 dataset_cpp/build/
+training/cpp/build/
 
 saves
 
 # output/: игнорируем тяжёлые датасеты и модели; графики (.png), отчёты (.md, .txt) и CSV в research/ — в репозитории
 output/full_dataset.parquet
 output/model_xgb.json
+output/model_xgb_tr_amount_le_30.json
+output/model_xgb_tr_amount_gt_30.json
+output/model_xgb_tr_amount_le_110.json
+output/model_xgb_tr_amount_gt_110.json
+
+# Кэш TSV для CatBoost (генерируется из parquet)
+output/*_tsv_cache/
+
+output/weights/model_torch_mlp.pt
 output/model_lgb.txt
 output/model_pytorch.pt
 output/xgb_grid_extmem_train/
 output/xgb_grid_extmem_val/
+output/xgb_extmem_train_tr_amount_le_30/
+output/xgb_extmem_val_tr_amount_le_30/
+output/xgb_extmem_train_tr_amount_gt_30/
+output/xgb_extmem_val_tr_amount_gt_30/
 
 # CSV (submission и прочее; исключение — таблицы исследований)
 *.csv
@@ -32,6 +46,7 @@ output/xgb_grid_extmem_val/
 
 # Служебные JSONL артефакты обучения/поиска
 training/grid_search/model_xgb_best.json
+training/grid_search/xgb_best_params_save.json
 training/grid_search/xgb_grid_trials.jsonl
 output/research/xgb_forward_selection_history.jsonl
 

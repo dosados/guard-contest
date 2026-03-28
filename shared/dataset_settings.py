@@ -7,8 +7,8 @@ config → features → parquet_batch_aggregates → (раньше) config.
 
 from __future__ import annotations
 
-# Размер скользящего окна транзакций на клиента (как в dataset_cpp_module_spec.txt)
-WINDOW_TRANSACTIONS = 150
+# Размер скользящего окна транзакций на клиента (верхний предел активного окна).
+WINDOW_TRANSACTIONS = 512
 
 # Режим датасета: "full" — учитывается вся история в окне; "window_50" — окно WINDOW_TRANSACTIONS_MODE
 DATASET_MODE = "full"

@@ -5,6 +5,8 @@ eval_metric aucpr, early stopping, PR-AUC на val со sample_weight (как в
 
 Метрика каждой конфигурации дописывается в JSONL (по умолчанию training/grid_search/xgb_grid_trials.jsonl)
 сразу после trial.
+
+Сетка перебора задаётся только в training.config.XGB_PARAM_GRID.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ from shared.config import OUTPUT_DIR, TRAIN_DATASET_PATH
 from training.config import (
     VAL_RATIO,
     XGB_EXTERNAL_PARQUET_BATCH_ROWS,
+    XGB_PARAM_GRID,
     XGB_PARAMS,
 )
 from training.main import _detect_columns, _find_time_cutoff, train_xgb_streaming_prauc
@@ -36,32 +39,34 @@ logger = logging.getLogger(__name__)
 
 GRID_SEARCH_DIR = Path(__file__).resolve().parent / "grid_search"
 
-# Ключи — как в XGB_PARAMS / sklearn; значения — кандидаты для полного перебора.
-# Акцент на регуляризации: min_child_weight, gamma, reg_lambda (alpha фиксирован в _xgb_params_from_combo).
-DEFAULT_PARAM_GRID: dict[str, list[Any]] = {
-    "learning_rate": [0.05],
-    "max_depth": [8],
-    "subsample": [0.8],
-    "colsample_bytree": [0.8],
-    "min_child_weight": [1.0, 3.0],
-    "gamma": [0.0, 0.5, 1.0],
-    "reg_lambda": [1.0, 5.0],
-}
-
 
 def _xgb_params_from_combo(combo: dict[str, Any]) -> dict[str, float | int | str]:
-    """Те же имена полей, что в training/main._build_xgb_train_params (XGBoost API)."""
+    """
+    Те же имена полей, что в training/main._build_xgb_train_params (XGBoost API).
+    Ключи из combo дополняются дефолтами из XGB_PARAMS, чтобы неполная сетка оставалась валидной.
+    """
+    base = {
+        "learning_rate": float(XGB_PARAMS["learning_rate"]),
+        "max_depth": int(XGB_PARAMS["max_depth"]),
+        "subsample": float(XGB_PARAMS["subsample"]),
+        "colsample_bytree": float(XGB_PARAMS["colsample_bytree"]),
+        "min_child_weight": float(XGB_PARAMS.get("min_child_weight", 1.0)),
+        "gamma": float(XGB_PARAMS.get("gamma", 0.0)),
+        "reg_alpha": float(XGB_PARAMS.get("reg_alpha", 0.0)),
+        "reg_lambda": float(XGB_PARAMS.get("reg_lambda", 1.0)),
+    }
+    merged = {**base, **combo}
     return {
         "objective": "binary:logistic",
         "eval_metric": "aucpr",
-        "eta": float(combo["learning_rate"]),
-        "max_depth": int(combo["max_depth"]),
-        "subsample": float(combo["subsample"]),
-        "colsample_bytree": float(combo["colsample_bytree"]),
-        "min_child_weight": float(combo["min_child_weight"]),
-        "gamma": float(combo["gamma"]),
-        "alpha": float(combo.get("reg_alpha", 0.0)),
-        "lambda": float(combo["reg_lambda"]),
+        "eta": float(merged["learning_rate"]),
+        "max_depth": int(merged["max_depth"]),
+        "subsample": float(merged["subsample"]),
+        "colsample_bytree": float(merged["colsample_bytree"]),
+        "min_child_weight": float(merged["min_child_weight"]),
+        "gamma": float(merged["gamma"]),
+        "alpha": float(merged["reg_alpha"]),
+        "lambda": float(merged["reg_lambda"]),
         "tree_method": str(XGB_PARAMS.get("tree_method", "hist")),
         "seed": int(XGB_PARAMS.get("random_state", 42)),
     }
@@ -89,7 +94,7 @@ def run_grid_search(
     Возвращает (лучший combo, лучший PR-AUC, все строки результатов, бустер лучшего прогона, cleanup для него).
     После save_model(best) вызовите cleanup(), иначе останутся дисковый кэш и ссылки на DMatrix.
     """
-    grid = param_grid if param_grid is not None else DEFAULT_PARAM_GRID
+    grid = param_grid if param_grid is not None else XGB_PARAM_GRID
     if not path.exists():
         raise FileNotFoundError(f"Не найден {path}")
 
@@ -128,6 +133,7 @@ def run_grid_search(
                 path,
                 feature_cols,
                 dttm_col,
+                "tr_amount",
                 cutoff_day,
                 params,
                 ext_train_cache=train_cache,
@@ -250,7 +256,7 @@ def main() -> None:
     trials_log = None if args.no_trials_log else args.trials_log
     best_combo, best_pr, rows, best_booster, best_cleanup = run_grid_search(
         args.dataset,
-        param_grid=DEFAULT_PARAM_GRID,
+        param_grid=XGB_PARAM_GRID,
         val_ratio=args.val_ratio,
         batch_rows=args.batch_rows,
         num_boost_round=args.num_boost_round,

@@ -48,6 +48,7 @@ FEATURE_NAMES: list[str] = [
     "transactions_in_session",
     "timezone_missing",
     "tr_amount",
+    "event_type_nm",
     "event_descr",
     "mcc_code",
     "trend_mean_last_3_to_10",
@@ -69,6 +70,9 @@ FEATURE_NAMES: list[str] = [
     "event_descr_freq_last_1h",
     "event_descr_freq_last_6h",
     "event_descr_freq_last_24h",
+    "event_type_nm_freq_last_1h",
+    "event_type_nm_freq_last_6h",
+    "event_type_nm_freq_last_24h",
     "mcc_freq_last_1h",
     "mcc_freq_last_6h",
     "mcc_freq_last_24h",
@@ -86,6 +90,25 @@ def cat_to_float(s: Any) -> float:
         return 0.0
     h = hashlib.md5(t.encode("utf-8")).hexdigest()
     return float(int(h, 16) % 1_000_000)
+
+
+def _parse_event_type_nm(v: Any) -> float:
+    """Код/число из колонки event_type_nm как float; иначе NaN (без хеширования)."""
+    if v is None:
+        return float("nan")
+    if isinstance(v, bool):
+        return float("nan")
+    if isinstance(v, (int, float)):
+        x = float(v)
+        return x if math.isfinite(x) else float("nan")
+    s = str(v).strip()
+    if not s:
+        return float("nan")
+    try:
+        x = float(s)
+        return x if math.isfinite(x) else float("nan")
+    except (TypeError, ValueError):
+        return float("nan")
 
 
 def _channel_sub(row: Mapping[str, Any]) -> Any:
@@ -375,6 +398,7 @@ def compute_features(
     descr = row.get("event_descr")
     if descr is None:
         descr = row.get("event_desc")
+    event_type_nm = row.get("event_type_nm")
 
     hour_f = float(hour_val) if dttm is not None else float("nan")
     dow_f = float(dow_val) if dttm is not None else float("nan")
@@ -394,6 +418,7 @@ def compute_features(
 
     # Frequencies and pair novelty (depend on exact strings in window).
     descr_c = "" if _empty_str(descr) else str(descr).strip()
+    event_type_nm_cur = _parse_event_type_nm(event_type_nm)
     mcc_c_s = "" if _empty_str(mcc_c) else str(mcc_c).strip()
     if dttm is not None:
         thr_1h = dttm - timedelta(hours=1)
@@ -416,6 +441,18 @@ def compute_features(
                     if t.dttm is not None and t.dttm >= thr and ("" if _empty_str(t.event_descr) else str(t.event_descr).strip()) == descr_c
                 )
             )
+        if kind == "event_type_nm":
+            if not math.isfinite(event_type_nm_cur):
+                return 0.0
+            return float(
+                sum(
+                    1
+                    for t in window
+                    if t.dttm is not None
+                    and t.dttm >= thr
+                    and _parse_event_type_nm(t.event_type_nm) == event_type_nm_cur
+                )
+            )
         if kind == "mcc":
             if not mcc_c_s:
                 return 0.0
@@ -431,6 +468,9 @@ def compute_features(
     event_descr_freq_last_1h = _freq_last(thr_1h, kind="descr")
     event_descr_freq_last_6h = _freq_last(thr_6h, kind="descr")
     event_descr_freq_last_24h = _freq_last(thr_24h, kind="descr")
+    event_type_nm_freq_last_1h = _freq_last(thr_1h, kind="event_type_nm")
+    event_type_nm_freq_last_6h = _freq_last(thr_6h, kind="event_type_nm")
+    event_type_nm_freq_last_24h = _freq_last(thr_24h, kind="event_type_nm")
     mcc_freq_last_1h = _freq_last(thr_1h, kind="mcc")
     mcc_freq_last_6h = _freq_last(thr_6h, kind="mcc")
     mcc_freq_last_24h = _freq_last(thr_24h, kind="mcc")
@@ -510,6 +550,7 @@ def compute_features(
         "transactions_in_session": float(n_sess + 1),
         "timezone_missing": 1.0 if _empty_str(tz_c) else 0.0,
         "tr_amount": tr_cap,
+        "event_type_nm": event_type_nm_cur,
         "event_descr": cat_to_float(descr),
         "mcc_code": cat_to_float(mcc_c),
         "trend_mean_last_3_to_10": trend_mean_last_3_to_10,
@@ -531,6 +572,9 @@ def compute_features(
         "event_descr_freq_last_1h": event_descr_freq_last_1h,
         "event_descr_freq_last_6h": event_descr_freq_last_6h,
         "event_descr_freq_last_24h": event_descr_freq_last_24h,
+        "event_type_nm_freq_last_1h": event_type_nm_freq_last_1h,
+        "event_type_nm_freq_last_6h": event_type_nm_freq_last_6h,
+        "event_type_nm_freq_last_24h": event_type_nm_freq_last_24h,
         "mcc_freq_last_1h": mcc_freq_last_1h,
         "mcc_freq_last_6h": mcc_freq_last_6h,
         "mcc_freq_last_24h": mcc_freq_last_24h,

@@ -11,7 +11,9 @@ import pyarrow.parquet as pq
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Print median value of 'tr_amount' from a parquet dataset."
+        description=(
+            "Print tr_amount percentiles (0..100 step 10) from a parquet dataset."
+        )
     )
     parser.add_argument(
         "dataset_path",
@@ -52,8 +54,13 @@ def main() -> None:
     if not tr_amount_chunks:
         raise ValueError("Column 'tr_amount' contains no numeric values.")
 
-    median_value = float(np.median(np.concatenate(tr_amount_chunks)))
-    print(f"Median tr_amount: {median_value}")
+    all_values = np.concatenate(tr_amount_chunks)
+    percentile_levels = np.arange(0, 101, 10)
+    percentile_values = np.percentile(all_values, percentile_levels)
+
+    print("tr_amount percentiles:")
+    for level, value in zip(percentile_levels, percentile_values):
+        print(f"P{int(level):>3}: {float(value)}")
 
 
 if __name__ == "__main__":

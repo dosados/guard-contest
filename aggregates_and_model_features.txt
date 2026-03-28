@@ -1,290 +1,75 @@
-Актуальные агрегаты и фичи датасета C++ (dataset_cpp/build_dataset.cpp)
+Актуальные агрегаты и фичи (только текущие)
 
-Источник истины: `dataset_cpp/build_dataset.cpp` (compute_features + kFeatureNames).
+Источник истины:
+- `shared/features.py` (`FEATURE_NAMES`, `compute_features`) — инференс.
+- `dataset_cpp/build_dataset.cpp` (`kFeatureNames`, `compute_features`) — train-датасет.
 
-Важно:
-- Ниже описаны именно текущие признаки, которые используются моделью (см. `shared/features.py::FEATURE_NAMES` и `compute_features`).
-- Сейчас это 51 фича (и они должны совпадать с `shared/features.py::FEATURE_NAMES` и порядком колонок в `output/full_dataset.parquet`).
-
-1) Как формируется окно истории
-
-- Для каждого `customer_id` хранится `deque` из последних транзакций `UserWindow::dq`.
-- Максимум окна: `kWindowCap = 150`.
-- Для каждой train-строки перед расчётом фич выбирается эффективная длина окна `effective_target_len`:
-  - `effective_target_len` случайно-дискретно выбирается в диапазоне `[101..150]` с весами  
-    `w(k) = exp(-kWindowWeightBeta * k)`, где `kWindowWeightBeta = 0.12`, `k = W - 101`.
-  - Детализация: `W = sample_effective_window_target(event_id, customer_id)`.
-- В фичах используется только суффикс окна длины:
-  - `eff = min(stored_window_size, effective_target_len)`,
-  - где `stored_window_size = len(dq)`.
-- Фичи считаются по окну ДО добавления текущей строки, затем текущая строка добавляется в окно.
-
-2) Что хранится в транзакции окна
-
-Из каждой строки parquet в окно кладётся `Txn`:
-- `amount` из `operaton_amt` (finite float, иначе `nullopt`),
-- `dttm` из `event_dttm` (datetime, иначе `nullopt`),
-- `hour_val`, `dow_py` (из `dttm`; `dow_py`: Monday=0 ... Sunday=6),
-- `os_type`, `dev_ver`, `mcc`,
-- `ch_type`, `ch_sub` (`channel_indicator_sub_type`, fallback `channel_indicator_subtype`),
-- `tz`, `compromised`, `web_rdp`, `voip`,
-- `session_id`, `browser_language`, `event_type_nm`,
-- `event_descr` (`event_descr`, fallback `event_desc`).
-
-3) Агрегаты, которые считаются по окну для фич
+Ниже только актуальные 55 фич.
 
 Обозначения:
-- `window_eff` — суффикс окна длины `eff`.
-- `amounts = [t.amount for t in window_eff, где amount finite]`.
-- `dttm_cur` — datetime текущей строки (если распарсился).
+- `window` — история транзакций пользователя до текущей строки.
+- `amounts` — валидные (`finite`) суммы из `window`.
+- `dttm_cur` — дата-время текущей транзакции.
+- `safe_div(a, b)` — деление с защитой (`|b| <= 1e-9 -> b = 1e-9`).
+- `p95(amounts) = sorted(amounts)[floor(0.95 * (n - 1))]`.
+- `cat_to_float(s) = MD5(trim(s)) % 1_000_000`, пустая строка -> `0.0`.
 
-3.1 Агрегаты по суммам:
-- `median(amounts)` (если `amounts` не пуст).
-- `mean(amounts)` (если `amounts` не пуст).
-- `std(amounts)` = выборочное std с делением на `n-1` (если `len(amounts) >= 2`).
-- `p95(amounts)`:
-  - `xs = sorted(amounts)`,
-  - `idx95 = floor(0.95 * (len(xs) - 1))`,
-  - `p95 = xs[idx95]`.
+Примечание:
+- В C++ `kWindowCap = 512`, `tr_amount` считается по эффективной длине окна `eff`.
+- В Python-инференсе используется фактическое окно (`len(window)`), с cap если он задан.
 
-3.2 Временные агрегаты за 24 часа:
-- `recent = [(t.dttm, t.amount) in window_eff, где t.dttm >= dttm_cur - 24h и amount finite]`.
-- `count_since(delta) = |{(tt, a) in recent: tt >= dttm_cur - delta}|`.
-- `sum_since(delta) = sum(a for (tt, a) in recent if tt >= dttm_cur - delta)`.
-- `max24 = max(a for (_, a) in recent)`, если `recent` не пуст.
-
-3.3 Категориальные счётчики:
-- `dev_cnt[(os_type, dev_ver)]` — если хотя бы одно из полей не пустое.
-- `mcc_cnt[mcc]` — если `mcc` не пустой.
-- `ch_cnt[(ch_type, ch_sub)]` — если хотя бы одно из полей не пустое.
-- `tz_cnt[tz]` — если `timezone` не пустой.
-- `bl_cnt[browser_language]` — если `browser_language` не пустой.
-- `sess_cnt[session_id]` — счётчик сессий (если `session_id` не пустой).
-
-3.4 Последняя транзакция по времени:
-- `last_ev = последняя t.dttm в window_eff (с конца), где dttm есть`.
-
-4) Формулы всех актуальных фич (порядок записи в parquet)
-
-1. `operation_amt`
-   - `amount_cur` из `operaton_amt`, если finite; иначе `NaN`.
-
-2. `log_1_plus_transactions_seen`
-   - `log1p(max(0, tr_am))`,
-   - где `tr_am = eff`.
-
-4. `amount_zscore`
-   - `(amount_cur - mean(amounts)) / std(amounts)`, если `amount_cur` finite и `std > 0`; иначе `NaN`.
-
-5. `is_amount_high`
-   - `1.0`, если `amount_cur > p95(amounts)` и оба finite; иначе `0.0`.
-
-7. `transactions_last_24h`
-   - `count_since(24h)` (float).
-
-8. `sum_amount_last_1h`
-   - `sum_since(1h)`.
-
-9. `max_amount_last_24h`
-   - `max24`, если finite; иначе `0.0`.
-
-10. `is_new_device`
-    - Для текущего ключа `dkey=(os_c, dev_c)`:
-    - если текущие `os_c/dev_c` оба пустые -> `0.0`,
-    - иначе `1.0`, если `dev_cnt[dkey] == 0`, иначе `0.0`.
-
-11. `is_new_mcc`
-    - если текущий `mcc_c` пустой -> `0.0`,
-    - иначе `1.0`, если `mcc_cnt[mcc_c] == 0`, иначе `0.0`.
-
-12. `is_new_channel`
-    - Для текущего `ckey=(ch_t, ch_s)`:
-    - если `ch_t/ch_s` оба пустые -> `0.0`,
-    - иначе `1.0`, если `ch_cnt[ckey] == 0`, иначе `0.0`.
-
-14. `is_compromised_device`
-    - `1.0`, если `compromised` парсится в finite float и строго равно `1.0`; иначе `0.0`.
-
-15. `web_rdp_connection`
-    - `1.0`, если `web_rdp_connection` непустое (после trim), иначе `0.0`.
-
-16. `phone_voip_call_state`
-    - `1.0`, если `phone_voip_call_state` непустое (после trim), иначе `0.0`.
-
-17. `hour`
-    - `hour(dttm_cur)` как float, если `dttm_cur` есть; иначе `NaN`.
-
-18. `day_of_week`
-    - `weekday(dttm_cur)` как float, где Monday=0 ... Sunday=6; если `dttm_cur` нет -> `NaN`.
-
-19. `is_night_transaction`
-    - если `dttm_cur` есть: `1.0`, когда `hour >= 22` или `hour < 6`, иначе `0.0`;
-    - если `dttm_cur` нет -> `NaN`.
-
-20. `is_weekend`
-    - если `dttm_cur` есть: `1.0`, когда `day_of_week >= 5`, иначе `0.0`;
-    - если `dttm_cur` нет -> `NaN`.
-
-21. `transactions_last_10m`
-    - `count_since(10m)` (float).
-
-22. `sum_amount_last_24h`
-    - `sum_since(24h)`.
-
-23. `time_since_prev_transaction`
-    - `seconds(dttm_cur - last_ev)`, если обе даты есть;
-    - иначе `-1.0`.
-
-24. `is_new_browser_language`
-    - если текущий `bl_c` пустой -> `0.0`,
-    - иначе `1.0`, если `bl_cnt[bl_c] == 0`, иначе `0.0`.
-
-25. `transactions_in_session`
-    - `sess_cnt[current_session_id] + 1` (float),
-    - если `session_id` пустой -> `1.0`.
-
-26. `timezone_missing`
-    - `1.0`, если текущий `timezone` пустой; иначе `0.0`.
-
-27. `tr_amount`
-    - `tr_am = eff = min(stored_window_size, effective_target_len)`.
-
-28. `event_descr`
-    - `cat_from_utf8(descr_cur)`,
-    - `descr_cur = event_descr`, fallback `event_desc`,
-    - `cat_from_utf8(s)`:
-      - `s_trim = trim(s)`,
-      - если пусто -> `0.0`,
-      - иначе `MD5(s_trim)` и далее остаток по модулю `1_000_000` из байтов хеша.
-
-29. `mcc_code`
-    - `cat_from_utf8(mcc_c)` по той же формуле.
-
-Дополнительные (расширенные) фичи, которые добавлены в `FEATURE_NAMES`:
-
-32. `trend_mean_last_3_to_10`
-    - `_safe_div(mean_last_3, mean_last_10)`,
-    - `mean_last_3 = mean(amounts[-3:])` (если `amounts` не пуст),
-    - `mean_last_10 = mean(amounts[-10:])` (если `amounts` не пуст),
-    - если не удалось посчитать -> `NaN`.
-
-33. `amount_percentile_rank`
-    - `sum(1 for a in amounts if a <= amount_cur) / len(amounts)`,
-    - если `amount_cur` не `NaN` и `amounts` не пуст -> иначе `NaN`.
-
-34. `std_time_deltas`
-    - `stdev(deltas)`,
-    - где `dttms = [t.dttm for t in window если t.dttm != None]`,
-    - `deltas[i] = seconds(dttms[i] - dttms[i-1])`,
-    - если `len(deltas) >= 2` -> иначе `NaN`.
-
-36. `is_new_device_tz_pair`
-    - Для ключа `dkey_tz = (os_c, dev_c, tz_c)`:
-    - если `os_c/dev_c` непустые и `tz_c` непустой,
-      и в окне ни разу не встречался такой же тройной ключ (кол-во = 0),
-      то `1.0`, иначе `0.0`.
-
-37. `is_device_switch`
-    - `1.0`, если `os_c/dev_c` непустые и `dkey_c=(os_c,dev_c) != last_dkey`,
-    - где `last_dkey=(last_txn.os_type, last_txn.dev_ver)`,
-    - иначе `0.0`.
-
-38. `is_mcc_switch`
-    - `1.0`, если `mcc_c` непустой и `mcc_c != last_mcc`,
-    - где `last_mcc = last_txn.mcc`,
-    - иначе `0.0`.
-
-39. `session_duration`
-    - `seconds(session_last_dttm[sid_c] - session_first_dttm[sid_c])`,
-    - где `sid_c = session_id` текущей строки,
-    - `session_first_dttm` и `session_last_dttm` считаются по окну как min/max `dttm` среди транзакций с тем же `session_id`,
-    - если обе даты есть -> иначе `NaN`.
-
-40. `session_mean_amount`
-    - `sess_sum / max(sess_cnt, 1)`,
-    - `sess_cnt` = кол-во транзакций в окне с тем же `session_id`,
-    - `sess_sum` = сумма `amount` тех же транзакций (если amount был валидный),
-    - если `sid_c` нет в окне -> `NaN` (как в `compute_features` при отсутствии `sid_c` в session_counts).
-
-43. `device_freq`
-    - `_safe_div(device_count_i, len(window))`,
-    - где `device_count_i = dev_cnt[dkey_c]` (как в `is_new_device`),
-    - если `len(window) > 0`, иначе `NaN`.
-
-44. `delta_1`
-    - `deltas[-1]`, если `len(deltas) >= 1`, иначе `NaN`.
-
-45. `delta_2`
-    - `deltas[-2]`, если `len(deltas) >= 2`, иначе `NaN`.
-
-46. `delta_3`
-    - `deltas[-3]`, если `len(deltas) >= 3`, иначе `NaN`.
-
-47. `acceleration_delta_1_over_2`
-    - `_safe_div(delta_1, delta_2)`, если и `delta_1`, и `delta_2` не `NaN`,
-    - иначе `NaN`.
-
-48. `std_delta_last_k`
-    - `stdev(last_k)`,
-    - где `last_k = deltas[-10:]`,
-    - если `len(last_k) >= 2`, иначе `NaN`.
-
-50. `time_since_last_device_change`
-    - Для `dttm_cur` текущей строки (если он есть):
-      ищем в окне по убыванию времени первую транзакцию `t`,
-      где устройство отличается от текущего `dkey_c=(os_c,dev_c)`,
-      и возвращаем `seconds(dttm_cur - t.dttm)`.
-    - Если не найдено -> `NaN`.
-
-51. `time_since_last_mcc_change`
-    - Для `dttm_cur` текущей строки (если он есть):
-      ищем в окне по убыванию времени первую транзакцию `t`,
-      где `t.mcc != mcc_c` (при условии, что `mcc_c` непустой),
-      и возвращаем `seconds(dttm_cur - t.dttm)`.
-    - Если не найдено -> `NaN`.
-
-52. `event_descr_freq_last_1h`
-    - число транзакций в окне, где `event_descr` (с trim) совпадает с текущим, и `event_dttm >= dttm_cur - 1h`.
-
-53. `event_descr_freq_last_6h`
-    - аналогично, но за 6 часов.
-
-54. `event_descr_freq_last_24h`
-    - аналогично, но за 24 часа.
-
-55. `mcc_freq_last_1h`
-    - число транзакций в окне, где `mcc_code` (с trim) совпадает с текущим, и `event_dttm >= dttm_cur - 1h`.
-
-56. `mcc_freq_last_6h`
-    - аналогично, но за 6 часов.
-
-57. `mcc_freq_last_24h`
-    - аналогично, но за 24 часа.
-
-58. `mcc_event_descr_pair_new`
-    - `1.0`, если пара `(mcc_code, event_descr)` (обе строки после trim) не встречалась ранее в окне; иначе `0.0`.
-
-59. `high_amount_ratio_last_24h`
-    - доля транзакций за последние 24 часа, у которых `amount > p95(amounts)` (p95 берётся по `amounts` окна).
-    - если за 24 часа нет валидных сумм или нет `p95` -> `0.0`.
-
-60. `amount_relative_to_mcc_median_5_days`
-    - `amount_cur / median(amounts_mcc_5d)`, где `amounts_mcc_5d` — суммы транзакций с тем же `mcc_code` за последние 5 дней.
-    - если нет `dttm_cur`, `amount_cur` невалиден, `mcc_code` пустой, или медиана = 0 -> `NaN`.
-
-5) Не-фичи, но поля датасета
-
-Кроме 51 фич C++ пишет:
-- `customer_id`,
-- `event_id`,
-- `target`,
-- `sample_weight`,
-- `event_dttm`.
-
-6) target и sample_weight
-
-- `target = 1`, если `event_id` присутствует в `train_labels.parquet`, иначе `0`.
-- `sample_weight`:
-  - `5.0`, если метка есть и `original_target == 1`,
-  - `2.0`, если метка есть и `original_target != 1`,
-  - `1.0`, если метки для `event_id` нет.
+1) `operation_amt`: `float(operaton_amt)` иначе `NaN`.
+2) `log_1_plus_transactions_seen`: `log1p(max(0, tr_amount))`.
+3) `amount_zscore`: `(amount_cur - mean(amounts)) / stdev(amounts)`, если `stdev > 0`, иначе `NaN`.
+4) `is_amount_high`: `1.0`, если `amount_cur > p95(amounts)`, иначе `0.0`.
+5) `transactions_last_24h`: count транзакций за 24h.
+6) `sum_amount_last_1h`: сумма `amount` за 1h.
+7) `max_amount_last_24h`: max `amount` за 24h, иначе `0.0`.
+8) `is_new_device`: новизна пары `(operating_system_type, device_system_version)`.
+9) `is_new_mcc`: новизна `mcc_code`.
+10) `is_new_channel`: новизна пары `(channel_indicator_type, channel_indicator_sub_type/subtype)`.
+11) `is_compromised_device`: `1.0`, если `compromised == 1.0`, иначе `0.0`.
+12) `web_rdp_connection`: `1.0`, если поле непустое.
+13) `phone_voip_call_state`: `1.0`, если поле непустое.
+14) `hour`: час из `event_dttm`, иначе `NaN`.
+15) `day_of_week`: `Monday=0 ... Sunday=6`, иначе `NaN`.
+16) `is_night_transaction`: `1.0`, если `hour >= 22` или `< 6`, иначе `0.0` (без времени -> `NaN`).
+17) `is_weekend`: `1.0`, если `day_of_week >= 5`, иначе `0.0` (без времени -> `NaN`).
+18) `transactions_last_10m`: count транзакций за 10m.
+19) `sum_amount_last_24h`: сумма `amount` за 24h.
+20) `time_since_prev_transaction`: `seconds(dttm_cur - last_dttm_in_window)` иначе `-1.0`.
+21) `is_new_browser_language`: новизна `browser_language`.
+22) `transactions_in_session`: `count(session_id == current_session_id in window) + 1`.
+23) `timezone_missing`: `1.0`, если `timezone` пустой.
+24) `tr_amount`: размер окна для расчета (`eff`/`tr_cap`).
+25) `event_type_nm`: числовое значение из колонки `event_type_nm` (float/int из parquet или парсинг строки); невалидное -> `NaN` (без MD5).
+26) `event_descr`: `cat_to_float(event_descr)` (fallback `event_desc`).
+27) `mcc_code`: `cat_to_float(mcc_code)`.
+28) `trend_mean_last_3_to_10`: `safe_div(mean(last_3_amounts), mean(last_10_amounts))`.
+29) `amount_percentile_rank`: `count(a <= amount_cur)/len(amounts)`, иначе `NaN`.
+30) `std_time_deltas`: `stdev` временных дельт между соседними транзакциями, иначе `NaN`.
+31) `is_new_device_tz_pair`: новизна тройки `(os, device_version, timezone)`.
+32) `is_device_switch`: отличие устройства от последней транзакции окна.
+33) `is_mcc_switch`: отличие `mcc_code` от последней транзакции окна.
+34) `session_duration`: `seconds(max_dttm(session)-min_dttm(session))`, иначе `NaN`.
+35) `session_mean_amount`: средняя `amount` по текущей сессии, иначе `NaN`.
+36) `device_freq`: `count(current_device)/len(window)`, иначе `NaN`.
+37) `delta_1`: последняя временная дельта, иначе `NaN`.
+38) `delta_2`: предпоследняя дельта, иначе `NaN`.
+39) `delta_3`: третья с конца дельта, иначе `NaN`.
+40) `acceleration_delta_1_over_2`: `safe_div(delta_1, delta_2)`, иначе `NaN`.
+41) `std_delta_last_k`: `stdev(last_k_deltas)` для `k=min(10,len(deltas))`, иначе `NaN`.
+42) `time_since_last_device_change`: секунды до последней транзакции с другим устройством, иначе `NaN`.
+43) `time_since_last_mcc_change`: секунды до последней транзакции с другим `mcc_code`, иначе `NaN`.
+44) `event_descr_freq_last_1h`: частота текущего `event_descr` за 1h.
+45) `event_descr_freq_last_6h`: частота текущего `event_descr` за 6h.
+46) `event_descr_freq_last_24h`: частота текущего `event_descr` за 24h.
+47) `event_type_nm_freq_last_1h`: число транзакций в окне за 1h с тем же числовым `event_type_nm` (равенство распарсенных float); при текущем `NaN` -> `0.0`.
+48) `event_type_nm_freq_last_6h`: то же за 6h.
+49) `event_type_nm_freq_last_24h`: то же за 24h.
+50) `mcc_freq_last_1h`: частота текущего `mcc_code` за 1h.
+51) `mcc_freq_last_6h`: частота текущего `mcc_code` за 6h.
+52) `mcc_freq_last_24h`: частота текущего `mcc_code` за 24h.
+53) `mcc_event_descr_pair_new`: `1.0`, если пары `(mcc_code, event_descr)` не было в окне.
+54) `high_amount_ratio_last_24h`: доля транзакций за 24h с `amount > p95(amounts)`, иначе `0.0`.
+55) `amount_relative_to_mcc_median_5_days`: `amount_cur / median(amounts_same_mcc_last_5_days)`, иначе `NaN`.

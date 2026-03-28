@@ -18,7 +18,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _JOBS: list[tuple[str, str]] = [
     ("xgb_grid_search", "training/xgb_grid_search.py"),
     ("research_main", "research/main.py"),
-    ("torch_train", "torch_model/train.py"),
+    ("torch_train", "torch_logic/train.py"),
 ]
 
 
