@@ -71,12 +71,19 @@ def export_train_val_tsv(
     *,
     prefer_cpp: bool = True,
     cpp_threads: int = 0,
+    remap_weight2_positive_label_to_zero: bool = False,
 ) -> None:
     """
     prefer_cpp: при наличии собранного parquet_to_catboost_tsv — только он; иначе Python-стриминг.
     C++ всегда режет по колонке event_dttm (как в датасете).
+    remap_weight2_positive_label_to_zero: только Python-стриминг (C++ не меняет метки по весу).
     """
-    if prefer_cpp:
+    use_cpp = prefer_cpp and not remap_weight2_positive_label_to_zero
+    if remap_weight2_positive_label_to_zero and prefer_cpp:
+        logger.info(
+            "Переназначение target (sample_weight=2 в parquet → label 0): экспорт через Python, не C++."
+        )
+    if use_cpp:
         exe = resolve_cpp_exe()
         if exe is not None:
             if train_tsv.resolve() != CPP_TRAIN_TSV.resolve() or val_tsv.resolve() != CPP_VAL_TSV.resolve():
@@ -105,4 +112,5 @@ def export_train_val_tsv(
         batch_rows,
         train_tsv,
         val_tsv,
+        remap_weight2_positive_label_to_zero=remap_weight2_positive_label_to_zero,
     )

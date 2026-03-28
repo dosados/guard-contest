@@ -57,6 +57,8 @@ def _stream_parquet_to_tsv_splits(
     batch_rows: int,
     train_tsv: Path,
     val_tsv: Path,
+    *,
+    remap_weight2_positive_label_to_zero: bool = False,
 ) -> None:
     """Один скан parquet: train/val по event_dttm → два TSV с заголовком."""
     for p in (train_tsv, val_tsv):
@@ -75,7 +77,11 @@ def _stream_parquet_to_tsv_splits(
         m_val = ~m_train
 
         if m_train.any():
-            x, y, w = _prepare_batch(dfb.loc[m_train], feature_cols)
+            x, y, w = _prepare_batch(
+                dfb.loc[m_train],
+                feature_cols,
+                remap_weight2_positive_label_to_zero=remap_weight2_positive_label_to_zero,
+            )
             df = pd.DataFrame(x, columns=feature_cols)
             df["target"] = y
             df["sample_weight"] = w
@@ -90,7 +96,11 @@ def _stream_parquet_to_tsv_splits(
             train_started = True
 
         if m_val.any():
-            x, y, w = _prepare_batch(dfb.loc[m_val], feature_cols)
+            x, y, w = _prepare_batch(
+                dfb.loc[m_val],
+                feature_cols,
+                remap_weight2_positive_label_to_zero=remap_weight2_positive_label_to_zero,
+            )
             df = pd.DataFrame(x, columns=feature_cols)
             df["target"] = y
             df["sample_weight"] = w
@@ -115,6 +125,8 @@ def _streaming_val_prauc_from_parquet(
     dttm_col: str,
     cutoff_day: pd.Timestamp,
     batch_rows: int,
+    *,
+    remap_weight2_positive_label_to_zero: bool = False,
 ) -> float:
     """PR-AUC на val без создания большого val Pool в памяти."""
     pf = pq.ParquetFile(parquet_path)
@@ -129,7 +141,11 @@ def _streaming_val_prauc_from_parquet(
         m_val = ~(dttm < cutoff_day)
         if not m_val.any():
             continue
-        x, y, w = _prepare_batch(dfb.loc[m_val], feature_cols)
+        x, y, w = _prepare_batch(
+            dfb.loc[m_val],
+            feature_cols,
+            remap_weight2_positive_label_to_zero=remap_weight2_positive_label_to_zero,
+        )
         p = np.asarray(model.predict_proba(x)[:, 1], dtype=np.float64)
         y_all.append(y.astype(np.int32, copy=False))
         p_all.append(p)

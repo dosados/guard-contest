@@ -175,6 +175,15 @@ def main() -> None:
         default=CATBOOST_THREAD_COUNT,
         help=f"число потоков C++-экспортёра (по умолчанию {CATBOOST_THREAD_COUNT}; 0 = авто по ядрам/row groups)",
     )
+    parser.add_argument(
+        "--remap-weight2-positives-as-zero",
+        action="store_true",
+        help=(
+            "Как --xgb-remap-weight2-positives-as-zero в training/main: target=1 и sample_weight=2 (в parquet, "
+            "до remap) в TSV как класс 0; веса через remap_sample_weight_from_dataset. При включении экспорт только "
+            "через Python (C++ не поддерживает)."
+        ),
+    )
     args = parser.parse_args()
 
     batch_rows = int(args.batch_rows if args.batch_rows is not None else XGB_EXTERNAL_PARQUET_BATCH_ROWS)
@@ -197,6 +206,10 @@ def main() -> None:
     cd_path = cache_dir / "column_description.cd"
 
     logger.info("Parquet → train.tsv / val.tsv, cutoff=%s …", cutoff_day.date())
+    if args.remap_weight2_positives_as_zero:
+        logger.info(
+            "CatBoost: переназначение меток — target=1 и sample_weight=2 → label 0 в train/val TSV (как в XGB main)."
+        )
     _write_column_description(cd_path, feature_cols)
     export_train_val_tsv(
         TRAIN_DATASET_PATH,
@@ -208,6 +221,7 @@ def main() -> None:
         batch_rows,
         prefer_cpp=not args.no_cpp,
         cpp_threads=args.cpp_threads,
+        remap_weight2_positive_label_to_zero=args.remap_weight2_positives_as_zero,
     )
 
     logger.info("Подсчёт val-строк по time split …")
@@ -245,6 +259,7 @@ def main() -> None:
                 dttm_col,
                 cutoff_day,
                 batch_rows,
+                remap_weight2_positive_label_to_zero=args.remap_weight2_positives_as_zero,
             )
             logger.info("PR-AUC (val): sklearn с sample_weight, потоковый расчёт")
         model.save_model(str(MODEL_PATH))
