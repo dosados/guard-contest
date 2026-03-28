@@ -48,11 +48,20 @@ logger = logging.getLogger(__name__)
 TR_AMOUNT_SPLIT_THRESHOLD = 30.0
 
 
-def _prepare_batch(dfb: pd.DataFrame, feature_cols: list[str]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _prepare_batch(
+    dfb: pd.DataFrame,
+    feature_cols: list[str],
+    *,
+    remap_weight2_positive_label_to_zero: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     x = dfb[feature_cols].apply(pd.to_numeric, errors="coerce").astype(np.float32).to_numpy(copy=False)
     y = pd.to_numeric(dfb["target"], errors="coerce").fillna(0).astype(np.int32).to_numpy(copy=False)
-    w = pd.to_numeric(dfb["sample_weight"], errors="coerce").fillna(1.0).astype(np.float32).to_numpy(copy=False)
-    w = remap_sample_weight_from_dataset(w)
+    w_raw = pd.to_numeric(dfb["sample_weight"], errors="coerce").fillna(1.0).astype(np.float32).to_numpy(copy=False)
+    if remap_weight2_positive_label_to_zero:
+        y = y.copy()
+        soft = (y == 1) & np.isclose(w_raw, np.float32(2.0), rtol=0.0, atol=1e-5)
+        y[soft] = 0
+    w = remap_sample_weight_from_dataset(w_raw)
     return x, y, w
 
 
@@ -197,6 +206,7 @@ class ParquetTrainValDataIter(DataIter):
         cache_prefix: str | None,
         tr_amount_lower_exclusive: float | None = None,
         tr_amount_upper_inclusive: float | None = None,
+        remap_weight2_positive_label_to_zero: bool = False,
     ) -> None:
         self._parquet_path = parquet_path
         self._feature_cols = feature_cols
@@ -207,6 +217,7 @@ class ParquetTrainValDataIter(DataIter):
         self._mode = mode
         self._tr_amount_lower_exclusive = tr_amount_lower_exclusive
         self._tr_amount_upper_inclusive = tr_amount_upper_inclusive
+        self._remap_weight2_positive_label_to_zero = remap_weight2_positive_label_to_zero
         self._cols = feature_cols + ["target", "sample_weight", dttm_col]
         self._batch_iter = None
         if cache_prefix is not None:
@@ -235,7 +246,11 @@ class ParquetTrainValDataIter(DataIter):
                 mask &= tr_values <= float(self._tr_amount_upper_inclusive)
             if not mask.any():
                 continue
-            x, y, w = _prepare_batch(dfb.loc[mask], self._feature_cols)
+            x, y, w = _prepare_batch(
+                dfb.loc[mask],
+                self._feature_cols,
+                remap_weight2_positive_label_to_zero=self._remap_weight2_positive_label_to_zero,
+            )
             input_data(
                 data=x,
                 label=y.astype(np.float32),
@@ -262,9 +277,11 @@ def train_xgb_streaming_prauc(
     batch_rows: int | None = None,
     early_stopping_rounds: int | None = None,
     verbose_eval: int | None = None,
+    remap_weight2_positive_label_to_zero: bool = False,
 ) -> tuple[float, Any, Callable[[], None]]:
     """
     Один прогон как в main: QuantileDMatrix / ExtMemQuantileDMatrix, eval + early stopping, PR-AUC (val) с sample_weight.
+    При remap_weight2_positive_label_to_zero=True метки на train/val совпадают с флагом --xgb-remap-weight2-positives-as-zero.
     Возвращает (pr_auc, booster, cleanup). После save_model booster вызовите cleanup() (освобождает DMatrix и дисковый кэш).
     """
     import xgboost as xgb
@@ -308,6 +325,7 @@ def train_xgb_streaming_prauc(
         cache_prefix=train_cp,
         tr_amount_lower_exclusive=tr_amount_lower_exclusive,
         tr_amount_upper_inclusive=tr_amount_upper_inclusive,
+        remap_weight2_positive_label_to_zero=remap_weight2_positive_label_to_zero,
     )
     if use_extmem:
         dtrain = xgb.ExtMemQuantileDMatrix(train_it, missing=np.nan, enable_categorical=False)
@@ -347,6 +365,7 @@ def train_xgb_streaming_prauc(
             cache_prefix=val_cp,
             tr_amount_lower_exclusive=tr_amount_lower_exclusive,
             tr_amount_upper_inclusive=tr_amount_upper_inclusive,
+            remap_weight2_positive_label_to_zero=remap_weight2_positive_label_to_zero,
         )
         if use_extmem:
             dval = xgb.ExtMemQuantileDMatrix(
@@ -415,6 +434,7 @@ def evaluate_segmented_val_prauc(
     tr_amount_col: str = "tr_amount",
     threshold: float = TR_AMOUNT_SPLIT_THRESHOLD,
     batch_size: int = 1_000_000,
+    remap_weight2_positive_label_to_zero: bool = False,
 ) -> float:
     """Единый PR-AUC на всей val: запись роутится в low/high модель по tr_amount, как в submission."""
     import xgboost as xgb
@@ -442,8 +462,14 @@ def evaluate_segmented_val_prauc(
         high_mask = ~low_mask
 
         y = pd.to_numeric(val_df["target"], errors="coerce").fillna(0).astype(np.int32).to_numpy(copy=False)
-        w = pd.to_numeric(val_df["sample_weight"], errors="coerce").fillna(1.0).astype(np.float32).to_numpy(copy=False)
-        w = remap_sample_weight_from_dataset(w).astype(np.float64, copy=False)
+        w_raw = pd.to_numeric(val_df["sample_weight"], errors="coerce").fillna(1.0).astype(np.float32).to_numpy(
+            copy=False
+        )
+        if remap_weight2_positive_label_to_zero:
+            y = y.copy()
+            soft = (y == 1) & np.isclose(w_raw, np.float32(2.0), rtol=0.0, atol=1e-5)
+            y[soft] = 0
+        w = remap_sample_weight_from_dataset(w_raw).astype(np.float64, copy=False)
         p = np.zeros(len(val_df), dtype=np.float32)
 
         if bool(low_mask.any()):
@@ -499,6 +525,15 @@ def main() -> None:
             "По умолчанию обучается одна модель в legacy-путь."
         ),
     )
+    parser.add_argument(
+        "--xgb-remap-weight2-positives-as-zero",
+        action="store_true",
+        help=(
+            "При обучении XGBoost: target=0 без изменений; target=1 с sample_weight=2 (как в parquet, до remap) "
+            "подавать в модель как класс 0; target=1 с sample_weight=5 остаётся классом 1. "
+            "Веса обучения по-прежнему через remap_sample_weight_from_dataset."
+        ),
+    )
     args = parser.parse_args()
 
     if not TRAIN_DATASET_PATH.exists():
@@ -518,6 +553,10 @@ def main() -> None:
         params = _build_xgb_train_params(args.xgb_config)
         rounds = max(1, int(XGB_PARAMS.get("n_estimators", 600)))
         logger.info("XGBoost config mode: %s", args.xgb_config)
+        if args.xgb_remap_weight2_positives_as_zero:
+            logger.info(
+                "XGBoost: включено переназначение меток — target=1 и sample_weight=2 → label 0 при обучении/val-метриках."
+            )
         logger.info("XGBoost train params: %s, num_boost_round=%d", params, rounds)
 
         if args.xgb_segmented:
@@ -557,6 +596,7 @@ def main() -> None:
                     tr_amount_upper_inclusive=seg["tr_amount_upper_inclusive"],
                     segment_name=seg["name"],
                     num_boost_round=rounds,
+                    remap_weight2_positive_label_to_zero=args.xgb_remap_weight2_positives_as_zero,
                 )
                 results.append((f"XGBoost ({seg['name']})", pr))
                 booster.save_model(str(seg["model_path"]))
@@ -577,6 +617,7 @@ def main() -> None:
                     tr_amount_col="tr_amount",
                     threshold=TR_AMOUNT_SPLIT_THRESHOLD,
                     batch_size=XGB_EXTERNAL_PARQUET_BATCH_ROWS,
+                    remap_weight2_positive_label_to_zero=args.xgb_remap_weight2_positives_as_zero,
                 )
                 results.append(("XGBoost (val routed all rows)", pr_routed))
 
@@ -600,6 +641,7 @@ def main() -> None:
                 ext_val_cache=OUTPUT_DIR / "xgb_extmem_val_single",
                 segment_name="all",
                 num_boost_round=rounds,
+                remap_weight2_positive_label_to_zero=args.xgb_remap_weight2_positives_as_zero,
             )
             results.append(("XGBoost (single model)", pr))
             booster.save_model(str(MODEL_XGB_PATH))
