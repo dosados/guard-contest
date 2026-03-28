@@ -23,11 +23,11 @@ XGB_BEST_PARAMS_PATH = GRID_SEARCH_DIR / "xgb_best_params.json"
 # (через XGB_MODEL_HYPERPARAMS после сохранения лучшего JSON).
 XGB_PARAM_GRID: dict[str, list[Any]] = {
     "learning_rate": [0.05],
-    "max_depth": [6],
+    "max_depth": [6,5,4],
     "subsample": [0.9],
     "colsample_bytree": [0.8],
     "min_child_weight": [7, 9],
-    "gamma": [1.0, 5.0],
+    "gamma": [5.0],
     "reg_alpha": [0.0, 0.1],
     "reg_lambda": [5.0],
 }
