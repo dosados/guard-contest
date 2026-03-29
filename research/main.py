@@ -1,14 +1,21 @@
 """
-Permutation importance по train-датасету для XGBoost.
+Permutation importance на временной валидации для XGBoost (как в training/main.py).
 
-Датасет: используется только `output/full_dataset.parquet`.
+Датасет: `output/full_dataset.parquet`. Сплит по дням — `training.config.VAL_RATIO`
+(тот же алгоритм, что в `training.main._find_time_cutoff`).
 
-Признаки берутся через `shared.config.resolve_model_input_columns`, то есть
-строго по `shared.features.FEATURE_NAMES` (в актуальном порядке).
-Это автоматически подхватывает новые фичи после пересборки датасета.
+Признаки: `shared.config.resolve_model_input_columns` → порядок как у `MODEL_INPUT_FEATURES`.
 
-Важность: permutation importance на временной валидации:
-importance = baseline_pr_auc - pr_auc_after_shuffle(feature)
+Метрика: PR-AUC на val с `sample_weight` после `remap_sample_weight_from_dataset`, как при оценке
+XGBoost в training (опционально то же переназначение меток, что и `--xgb-remap-weight2-positives-as-zero`).
+
+Модель:
+- по умолчанию один бустер из `--xgb-model-path` (legacy `model_xgb.json`);
+- `--xgb-segmented`: две модели по `tr_amount`, как в submission / `training --xgb-segmented`.
+
+Предсказание: `iteration_range` по `best_iteration` / `best_ntree_limit`, если есть у загруженного бустера.
+
+Важность: mean (и std по повторам) для (baseline_pr_auc − pr_auc после перестановки столбца).
 
 Запуск из корня: PYTHONPATH=. python research/main.py
 """
@@ -20,6 +27,7 @@ import logging
 import sys
 from collections import Counter
 from pathlib import Path
+from typing import Callable
 
 import matplotlib
 import numpy as np
@@ -33,13 +41,18 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from shared.config import (
+    MODEL_XGB_HIGH_TR_AMOUNT_PATH,
+    MODEL_XGB_LOW_TR_AMOUNT_PATH,
     MODEL_XGB_PATH,
     OUTPUT_DIR,
     TRAIN_DATASET_PATH,
     remap_sample_weight_from_dataset,
     resolve_model_input_columns,
+    validate_xgboost_booster_feature_count,
 )
 from training.config import VAL_RATIO
+
+TR_AMOUNT_SPLIT_THRESHOLD = 30.0
 
 logger = logging.getLogger(__name__)
 matplotlib.use("Agg")
@@ -99,14 +112,23 @@ def _apply_memory_budget(
     return safe_train, safe_val
 
 
-def _prepare_batch(dfb: pd.DataFrame, feature_cols: list[str]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _prepare_batch(
+    dfb: pd.DataFrame,
+    feature_cols: list[str],
+    *,
+    remap_weight2_positive_label_to_zero: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     x = dfb[feature_cols].apply(pd.to_numeric, errors="coerce").astype(np.float32).to_numpy(copy=False)
     y = pd.to_numeric(dfb["target"], errors="coerce").fillna(0).astype(np.int32).to_numpy(copy=False)
     if "sample_weight" in dfb.columns:
-        w = pd.to_numeric(dfb["sample_weight"], errors="coerce").fillna(1.0).astype(np.float32).to_numpy(copy=False)
-        w = remap_sample_weight_from_dataset(w)
+        w_raw = pd.to_numeric(dfb["sample_weight"], errors="coerce").fillna(1.0).astype(np.float32).to_numpy(copy=False)
     else:
-        w = np.ones(shape=(len(dfb),), dtype=np.float32)
+        w_raw = np.ones(shape=(len(dfb),), dtype=np.float32)
+    if remap_weight2_positive_label_to_zero:
+        y = y.copy()
+        soft = (y == 1) & np.isclose(w_raw, np.float32(2.0), rtol=0.0, atol=1e-5)
+        y[soft] = 0
+    w = remap_sample_weight_from_dataset(w_raw)
     return x, y, w
 
 
@@ -178,51 +200,78 @@ def _load_xgb_booster(model_path: Path):
     return booster
 
 
-def _predict_proba(model, x: np.ndarray, feature_cols: list[str]) -> np.ndarray:
+def _predict_proba(booster, x: np.ndarray, feature_cols: list[str]) -> np.ndarray:
     import xgboost as xgb
 
     d = xgb.DMatrix(x, feature_names=feature_cols)
-    bi = getattr(model, "best_iteration", None)
+    bi = getattr(booster, "best_iteration", None)
     if bi is not None and bi >= 0:
         try:
-            return np.asarray(model.predict(d, iteration_range=(0, int(bi) + 1)), dtype=np.float32)
+            return np.asarray(booster.predict(d, iteration_range=(0, int(bi) + 1)), dtype=np.float32)
         except TypeError:
             pass
-    bnl = getattr(model, "best_ntree_limit", None)
+    bnl = getattr(booster, "best_ntree_limit", None)
     if bnl is not None and bnl > 0:
         try:
-            return np.asarray(model.predict(d, iteration_range=(0, int(bnl))), dtype=np.float32)
+            return np.asarray(booster.predict(d, iteration_range=(0, int(bnl))), dtype=np.float32)
         except TypeError:
-            return np.asarray(model.predict(d, ntree_limit=int(bnl)), dtype=np.float32)
-    return np.asarray(model.predict(d), dtype=np.float32)
+            return np.asarray(booster.predict(d, ntree_limit=int(bnl)), dtype=np.float32)
+    return np.asarray(booster.predict(d), dtype=np.float32)
+
+
+def _predict_proba_segmented(
+    low_booster,
+    high_booster,
+    x: np.ndarray,
+    feature_cols: list[str],
+    *,
+    threshold: float = TR_AMOUNT_SPLIT_THRESHOLD,
+) -> np.ndarray:
+    tr_idx = feature_cols.index("tr_amount")
+    tr = x[:, tr_idx]
+    low_mask = tr <= float(threshold)
+    high_mask = ~low_mask
+    out = np.empty(x.shape[0], dtype=np.float32)
+    if bool(low_mask.any()):
+        out[low_mask] = _predict_proba(low_booster, x[low_mask], feature_cols)
+    if bool(high_mask.any()):
+        out[high_mask] = _predict_proba(high_booster, x[high_mask], feature_cols)
+    return out
 
 
 def _compute_permutation_importance(
-    model,
+    predict_fn: Callable[[np.ndarray], np.ndarray],
     x_val: np.ndarray,
     y_val: np.ndarray,
     feature_cols: list[str],
     repeats: int,
     random_seed: int,
-) -> tuple[float, dict[str, float]]:
+    sample_weight: np.ndarray | None,
+) -> tuple[float, dict[str, float], dict[str, float]]:
     rng = np.random.default_rng(random_seed)
-    baseline_pred = _predict_proba(model, x_val, feature_cols)
-    baseline = float(average_precision_score(y_val, baseline_pred))
-    logger.info("xgboost baseline PR-AUC: %.6f", baseline)
+    kw: dict = {}
+    if sample_weight is not None:
+        kw["sample_weight"] = sample_weight
+    baseline_pred = predict_fn(x_val)
+    baseline = float(average_precision_score(y_val, baseline_pred, **kw))
+    w_note = " (weighted PR-AUC)" if sample_weight is not None else ""
+    logger.info("xgboost baseline PR-AUC%s: %.6f", w_note, baseline)
 
     importances: dict[str, float] = {}
+    stds: dict[str, float] = {}
     for j, feat in enumerate(tqdm(feature_cols, desc="xgboost: permutation", unit="feature")):
         drops: list[float] = []
         original = x_val[:, j].copy()
         for _ in range(repeats):
             perm_idx = rng.permutation(x_val.shape[0])
             x_val[:, j] = original[perm_idx]
-            pred = _predict_proba(model, x_val, feature_cols)
-            score = float(average_precision_score(y_val, pred))
+            pred = predict_fn(x_val)
+            score = float(average_precision_score(y_val, pred, **kw))
             drops.append(baseline - score)
         x_val[:, j] = original
         importances[feat] = float(np.mean(drops))
-    return baseline, importances
+        stds[feat] = float(np.std(drops, ddof=1)) if len(drops) > 1 else 0.0
+    return baseline, importances, stds
 
 
 def _sample_from_stream(
@@ -234,7 +283,9 @@ def _sample_from_stream(
     max_val_rows: int,
     batch_size: int,
     random_seed: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    *,
+    remap_weight2_positive_label_to_zero: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     rng = np.random.default_rng(random_seed)
 
     train_seen = 0
@@ -244,6 +295,7 @@ def _sample_from_stream(
     w_train: np.ndarray | None = None
     x_val: np.ndarray | None = None
     y_val: np.ndarray | None = None
+    w_val: np.ndarray | None = None
 
     pf = pq.ParquetFile(path)
     read_cols = _batch_read_columns(path, feature_cols, dttm_col)
@@ -258,7 +310,11 @@ def _sample_from_stream(
         val_mask = ~train_mask
 
         if train_mask.any():
-            xtr, ytr, wtr = _prepare_batch(dfb.loc[train_mask], feature_cols)
+            xtr, ytr, wtr = _prepare_batch(
+                dfb.loc[train_mask],
+                feature_cols,
+                remap_weight2_positive_label_to_zero=remap_weight2_positive_label_to_zero,
+            )
             for i in range(xtr.shape[0]):
                 train_seen += 1
                 if x_train is None:
@@ -278,36 +334,56 @@ def _sample_from_stream(
                         w_train[j] = wtr[i]
 
         if val_mask.any():
-            xva, yva, _ = _prepare_batch(dfb.loc[val_mask], feature_cols)
+            xva, yva, wva = _prepare_batch(
+                dfb.loc[val_mask],
+                feature_cols,
+                remap_weight2_positive_label_to_zero=remap_weight2_positive_label_to_zero,
+            )
             for i in range(xva.shape[0]):
                 val_seen += 1
                 if x_val is None:
                     x_val = np.empty((max_val_rows, len(feature_cols)), dtype=np.float32)
                     y_val = np.empty((max_val_rows,), dtype=np.int32)
+                    w_val = np.empty((max_val_rows,), dtype=np.float64)
                 if val_seen <= max_val_rows:
                     idx = val_seen - 1
                     x_val[idx] = xva[i]
                     y_val[idx] = yva[i]
+                    w_val[idx] = float(wva[i])
                 else:
                     j = int(rng.integers(0, val_seen))
                     if j < max_val_rows:
                         x_val[j] = xva[i]
                         y_val[j] = yva[i]
+                        w_val[j] = float(wva[i])
 
-    if x_train is None or y_train is None or w_train is None or x_val is None or y_val is None:
+    if x_train is None or y_train is None or w_train is None or x_val is None or y_val is None or w_val is None:
         raise RuntimeError("Не удалось собрать train/val сэмплы из датасета.")
 
     n_train = min(train_seen, max_train_rows)
     n_val = min(val_seen, max_val_rows)
     logger.info("Собран train sample: %d (из %d), val sample: %d (из %d)", n_train, train_seen, n_val, val_seen)
-    return x_train[:n_train], y_train[:n_train], w_train[:n_train], x_val[:n_val], y_val[:n_val]
+    return (
+        x_train[:n_train],
+        y_train[:n_train],
+        w_train[:n_train],
+        x_val[:n_val],
+        y_val[:n_val],
+        w_val[:n_val],
+    )
 
 
-def _importances_to_df(model_name: str, baseline: float, importances: dict[str, float]) -> pd.DataFrame:
+def _importances_to_df(
+    model_name: str,
+    baseline: float,
+    importances: dict[str, float],
+    stds: dict[str, float],
+) -> pd.DataFrame:
     df = pd.DataFrame(
         {
             "feature": list(importances.keys()),
             "importance_drop_pr_auc": list(importances.values()),
+            "importance_drop_std": [stds[f] for f in importances.keys()],
         }
     )
     df["model"] = model_name
@@ -316,14 +392,15 @@ def _importances_to_df(model_name: str, baseline: float, importances: dict[str, 
 
 
 def _plot_summary(summary: pd.DataFrame, out_dir: Path, top_k: int) -> tuple[Path, Path]:
+    col = "mean_importance_drop_pr_auc"
     top_df = summary.head(top_k).copy()
-    low_df = summary.tail(top_k).copy().sort_values("mean_importance_drop_pr_auc", ascending=True)
+    low_df = summary.tail(top_k).copy().sort_values(col, ascending=True)
 
     top_path = out_dir / "top_features.png"
     low_path = out_dir / "least_features.png"
 
     plt.figure(figsize=(12, 8))
-    plt.barh(top_df["feature"][::-1], top_df["mean_importance_drop_pr_auc"][::-1], color="#1f77b4")
+    plt.barh(top_df["feature"][::-1], top_df[col][::-1], color="#1f77b4")
     plt.xlabel("Mean drop in PR-AUC after permutation")
     plt.ylabel("Feature")
     plt.title("Most important features")
@@ -332,7 +409,7 @@ def _plot_summary(summary: pd.DataFrame, out_dir: Path, top_k: int) -> tuple[Pat
     plt.close()
 
     plt.figure(figsize=(12, 8))
-    plt.barh(low_df["feature"], low_df["mean_importance_drop_pr_auc"], color="#ff7f0e")
+    plt.barh(low_df["feature"], low_df[col], color="#ff7f0e")
     plt.xlabel("Mean drop in PR-AUC after permutation")
     plt.ylabel("Feature")
     plt.title("Least important features")
@@ -392,6 +469,41 @@ def _write_markdown_report(
     out_path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def _write_full_permutation_ranking_text(
+    path: Path,
+    *,
+    summary: pd.DataFrame,
+    baseline: float,
+    model_label: str,
+    val_rows: int,
+    repeats: int,
+    weighted_metrics: bool,
+    segmented: bool,
+) -> None:
+    lines: list[str] = [
+        "Permutation importance — полное ранжирование признаков (XGBoost)",
+        "",
+        "Интерпретация: mean_drop = baseline_pr_auc - pr_auc после случайной перестановки значений признака "
+        "внутри валидационного сэмпла; std_drop — разброс по повторам перестановки.",
+        f"baseline_pr_auc: {baseline:.10f}" + (" (weighted, как в training/main при eval)" if weighted_metrics else ""),
+        f"model: {model_label}",
+        f"val_rows (sample): {val_rows}",
+        f"repeats_per_feature: {repeats}",
+        f"xgb_segmented_tr_amount: {segmented}",
+        "",
+        f"{'rank':>5}  {'feature':<52}  {'mean_drop_pr_auc':>20}  {'std_drop':>16}",
+        "-" * 100,
+    ]
+    mean_col = "mean_importance_drop_pr_auc"
+    std_col = "std_importance_drop_across_repeats"
+    for rank, row in enumerate(summary.itertuples(index=False), start=1):
+        feat = getattr(row, "feature")
+        m = getattr(row, mean_col)
+        s = getattr(row, std_col)
+        lines.append(f"{rank:5d}  {feat:<52}  {m:20.10f}  {s:16.10f}")
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -410,7 +522,20 @@ def main() -> None:
         "--xgb-model-path",
         type=Path,
         default=MODEL_XGB_PATH,
-        help="Путь к обученной XGBoost-модели (по умолчанию output/model_xgb.json из training/main).",
+        help="Одиночная XGBoost-модель (по умолчанию output/model_xgb.json). Игнорируется при --xgb-segmented.",
+    )
+    parser.add_argument(
+        "--xgb-segmented",
+        action="store_true",
+        help=(
+            "Две модели по tr_amount, как training/main.py --xgb-segmented: "
+            f"{MODEL_XGB_LOW_TR_AMOUNT_PATH.name} и {MODEL_XGB_HIGH_TR_AMOUNT_PATH.name}."
+        ),
+    )
+    parser.add_argument(
+        "--xgb-remap-weight2-positives-as-zero",
+        action="store_true",
+        help="Совпадение меток val с флагом --xgb-remap-weight2-positives-as-zero при обучении XGB.",
     )
     parser.add_argument(
         "--memory-safety-factor",
@@ -425,13 +550,22 @@ def main() -> None:
             f"Не найден {TRAIN_DATASET_PATH}. "
             "Сначала соберите датасет: ./dataset_cpp/build/build_dataset ."
         )
-    if not args.xgb_model_path.exists():
+    if args.xgb_segmented:
+        if not MODEL_XGB_LOW_TR_AMOUNT_PATH.exists() or not MODEL_XGB_HIGH_TR_AMOUNT_PATH.exists():
+            raise FileNotFoundError(
+                f"Для --xgb-segmented нужны обе модели: {MODEL_XGB_LOW_TR_AMOUNT_PATH} и {MODEL_XGB_HIGH_TR_AMOUNT_PATH}. "
+                "Обучите: PYTHONPATH=. python training/main.py --xgb-config best --xgb-segmented"
+            )
+    elif not args.xgb_model_path.exists():
         raise FileNotFoundError(
             f"Не найдена модель {args.xgb_model_path}. "
             "Сначала обучите XGBoost: PYTHONPATH=. python training/main.py --xgb-config best"
         )
     logger.info("Файл датасета: %s", TRAIN_DATASET_PATH)
-    logger.info("Файл XGBoost-модели: %s", args.xgb_model_path)
+    if args.xgb_segmented:
+        logger.info("XGBoost сегменты: %s | %s", MODEL_XGB_LOW_TR_AMOUNT_PATH, MODEL_XGB_HIGH_TR_AMOUNT_PATH)
+    else:
+        logger.info("Файл XGBoost-модели: %s", args.xgb_model_path)
 
     if args.max_memory_gb <= 1.0:
         raise ValueError("--max-memory-gb должен быть > 1")
@@ -447,8 +581,11 @@ def main() -> None:
         max_memory_gb=args.max_memory_gb,
         safety_factor=args.memory_safety_factor,
     )
+    if args.xgb_segmented and "tr_amount" not in feature_cols:
+        raise ValueError("Для --xgb-segmented в признаках модели должна быть колонка tr_amount.")
+
     cutoff_day = _find_time_cutoff(TRAIN_DATASET_PATH, VAL_RATIO)
-    x_train, y_train, w_train, x_val, y_val = _sample_from_stream(
+    x_train, y_train, w_train, x_val, y_val, w_val = _sample_from_stream(
         TRAIN_DATASET_PATH,
         feature_cols=feature_cols,
         dttm_col=dttm_col,
@@ -457,25 +594,51 @@ def main() -> None:
         max_val_rows=safe_val_rows,
         batch_size=args.batch_size,
         random_seed=args.seed,
+        remap_weight2_positive_label_to_zero=args.xgb_remap_weight2_positives_as_zero,
     )
+    if args.xgb_remap_weight2_positives_as_zero:
+        logger.info("Метки val/train-сэмпла: включено переназначение target=1, sample_weight=2 → 0 (как в training XGB).")
 
     logger.info("=== Permutation importance: xgboost (pretrained) ===")
-    model = _load_xgb_booster(args.xgb_model_path)
-    baseline, importances = _compute_permutation_importance(
-        model=model,
+    if args.xgb_segmented:
+        low_b = _load_xgb_booster(MODEL_XGB_LOW_TR_AMOUNT_PATH)
+        high_b = _load_xgb_booster(MODEL_XGB_HIGH_TR_AMOUNT_PATH)
+        validate_xgboost_booster_feature_count(low_b)
+        validate_xgboost_booster_feature_count(high_b)
+
+        def predict_fn(x: np.ndarray) -> np.ndarray:
+            return _predict_proba_segmented(low_b, high_b, x, feature_cols)
+
+        model_label = (
+            f"xgboost segmented: {MODEL_XGB_LOW_TR_AMOUNT_PATH.name} + {MODEL_XGB_HIGH_TR_AMOUNT_PATH.name}"
+        )
+    else:
+        booster = _load_xgb_booster(args.xgb_model_path)
+        validate_xgboost_booster_feature_count(booster)
+
+        def predict_fn(x: np.ndarray) -> np.ndarray:
+            return _predict_proba(booster, x, feature_cols)
+
+        model_label = f"xgboost single: {args.xgb_model_path}"
+
+    baseline, importances, stds = _compute_permutation_importance(
+        predict_fn=predict_fn,
         x_val=x_val.copy(),
         y_val=y_val,
         feature_cols=feature_cols,
         repeats=args.repeats,
         random_seed=args.seed,
+        sample_weight=w_val,
     )
-    result_frames = [_importances_to_df("xgboost", baseline, importances)]
+    result_frames = [_importances_to_df("xgboost", baseline, importances, stds)]
 
     all_results = pd.concat(result_frames, ignore_index=True)
     summary = (
-        all_results.groupby("feature", as_index=False)["importance_drop_pr_auc"]
-        .mean()
-        .rename(columns={"importance_drop_pr_auc": "mean_importance_drop_pr_auc"})
+        all_results.groupby("feature", as_index=False)
+        .agg(
+            mean_importance_drop_pr_auc=("importance_drop_pr_auc", "mean"),
+            std_importance_drop_across_repeats=("importance_drop_std", "first"),
+        )
         .sort_values("mean_importance_drop_pr_auc", ascending=False, ignore_index=True)
     )
 
@@ -484,6 +647,7 @@ def main() -> None:
     per_model_path = out_dir / "feature_importance_per_model.csv"
     summary_path = out_dir / "feature_importance_summary.csv"
     txt_path = out_dir / "feature_importance_report.txt"
+    full_ranking_path = out_dir / "feature_importance_permutation_full_ranking.txt"
     md_path = out_dir / "feature_importance_report.md"
 
     all_results.to_csv(per_model_path, index=False)
@@ -495,9 +659,11 @@ def main() -> None:
 
     lines = []
     lines.append("Feature importance report (permutation importance on time-based validation)")
-    lines.append(f"Model: xgboost (loaded from {args.xgb_model_path})")
+    lines.append(f"Model: {model_label}")
     lines.append(f"Rows used: train={len(x_train)}, val={len(x_val)}")
     lines.append(f"Permutation repeats: {args.repeats}")
+    lines.append(f"PR-AUC on val: weighted (sample_weight после remap), как в training/main.")
+    lines.append(f"Полный список признаков по важности: {full_ranking_path.name}")
     lines.append("")
     lines.append("TOP most important features:")
     for i, row in top_df.iterrows():
@@ -508,6 +674,16 @@ def main() -> None:
         lines.append(f"{i + 1:2d}. {row['feature']}: {row['mean_importance_drop_pr_auc']:.8f}")
 
     txt_path.write_text("\n".join(lines), encoding="utf-8")
+    _write_full_permutation_ranking_text(
+        full_ranking_path,
+        summary=summary,
+        baseline=baseline,
+        model_label=model_label,
+        val_rows=len(x_val),
+        repeats=args.repeats,
+        weighted_metrics=True,
+        segmented=bool(args.xgb_segmented),
+    )
     top_png, low_png = _plot_summary(summary, out_dir=out_dir, top_k=top_k)
     _write_markdown_report(
         out_path=md_path,
@@ -523,6 +699,7 @@ def main() -> None:
     logger.info("Сохранено: %s", per_model_path)
     logger.info("Сохранено: %s", summary_path)
     logger.info("Сохранено: %s", txt_path)
+    logger.info("Сохранено: %s (полный рейтинг всех фич)", full_ranking_path)
     logger.info("Сохранено: %s", md_path)
     logger.info("Сохранено: %s", top_png)
     logger.info("Сохранено: %s", low_png)

@@ -18,38 +18,38 @@
 - Least important: `least_features.png`
 
 ## Top most important features
-1. `event_descr`: `0.00590829`
-2. `sum_amount_last_24h`: `0.00328486`
-3. `max_amount_last_24h`: `0.00310900`
-4. `mcc_code`: `0.00295186`
-5. `event_type_nm`: `0.00293905`
-6. `sum_amount_last_1h`: `0.00286409`
-7. `operation_amt`: `0.00284280`
-8. `device_freq`: `0.00253971`
-9. `std_time_deltas`: `0.00236550`
-10. `time_since_last_device_change`: `0.00210789`
-11. `std_delta_last_k`: `0.00203804`
-12. `hour`: `0.00178820`
-13. `high_amount_ratio_last_24h`: `0.00172302`
-14. `amount_percentile_rank`: `0.00146055`
-15. `delta_3`: `0.00107583`
+1. `mcc_code`: `0.03360816`
+2. `event_descr`: `0.02128706`
+3. `event_type_nm`: `0.02014056`
+4. `max_amount_last_24h`: `0.01863168`
+5. `device_freq`: `0.01737742`
+6. `distinct_event_descr_count_last_24h_norm`: `0.01447661`
+7. `std_delta_last_k`: `0.01384109`
+8. `event_type_nm_share_in_suffix`: `0.01224410`
+9. `operation_amt`: `0.01065952`
+10. `transactions_per_span_hour`: `0.01060109`
+11. `high_amount_ratio_last_24h`: `0.00969576`
+12. `hour`: `0.00920554`
+13. `mean_amount_last_3_transactions`: `0.00871898`
+14. `amount_ratio_to_min_amount_24h`: `0.00803395`
+15. `screen_size_cat`: `0.00779973`
 
 ## Top least important features
-1. `delta_2`: `-0.00050902`
-2. `tr_amount`: `-0.00038155`
-3. `event_type_nm_freq_last_1h`: `-0.00037988`
-4. `session_duration`: `-0.00034167`
-5. `transactions_in_session`: `-0.00031471`
-6. `delta_1`: `-0.00028232`
-7. `amount_relative_to_mcc_median_5_days`: `-0.00018164`
-8. `transactions_last_24h`: `-0.00017666`
-9. `transactions_last_10m`: `-0.00010583`
-10. `is_new_browser_language`: `-0.00001039`
-11. `is_new_device_tz_pair`: `-0.00000058`
-12. `is_compromised_device`: `0.00000124`
-13. `is_new_mcc`: `0.00000831`
-14. `is_weekend`: `0.00002933`
-15. `is_night_transaction`: `0.00002976`
+1. `mcc_freq_last_1h`: `-0.00146445`
+2. `tr_amount`: `-0.00113383`
+3. `transactions_last_10m`: `-0.00106143`
+4. `session_duration`: `-0.00075755`
+5. `sum_amount_last_10m`: `-0.00063061`
+6. `delta_3`: `-0.00052407`
+7. `is_amount_high`: `-0.00023358`
+8. `transactions_last_5m`: `-0.00021399`
+9. `transactions_in_session`: `-0.00007565`
+10. `unique_browser_language_count_suffix`: `-0.00006906`
+11. `amount_change_sign`: `-0.00005247`
+12. `compromised_history_count_suffix`: `-0.00004877`
+13. `seconds_since_last_compromised_tx`: `-0.00004698`
+14. `web_rdp_connection`: `-0.00003636`
+15. `is_new_timezone`: `-0.00001491`
 
 ## Practical interpretation
 - Keep top features as priority signals in future iterations.

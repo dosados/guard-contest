@@ -18,6 +18,8 @@ from typing import Any, Callable, Literal
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 from sklearn.metrics import average_precision_score
 from xgboost.core import DataIter
@@ -62,6 +64,56 @@ def _prepare_batch(
         soft = (y == 1) & np.isclose(w_raw, np.float32(2.0), rtol=0.0, atol=1e-5)
         y[soft] = 0
     w = remap_sample_weight_from_dataset(w_raw)
+    return x, y, w
+
+
+def _arrow_array_to_float64(arr: pa.Array) -> np.ndarray:
+    """Один столбец Arrow → float64 (NaN для null / нечисла); без полного DataFrame."""
+    n = len(arr)
+    if n == 0:
+        return np.empty(0, dtype=np.float64)
+    t = arr.type
+    if pa.types.is_dictionary(t):
+        arr = pc.dictionary_decode(arr)
+        t = arr.type
+    if pa.types.is_floating(t) or pa.types.is_integer(t) or pa.types.is_boolean(t):
+        v = pc.cast(arr, pa.float64())
+        return np.asarray(v.to_numpy(zero_copy_only=False), dtype=np.float64)
+    s = pd.to_numeric(pd.Series(arr.to_pandas(), dtype=object), errors="coerce")
+    return s.to_numpy(dtype=np.float64, na_value=np.nan)
+
+
+def _finalize_yw(
+    y_f: np.ndarray,
+    w_raw: np.ndarray,
+    *,
+    remap_weight2_positive_label_to_zero: bool,
+) -> tuple[np.ndarray, np.ndarray]:
+    y = np.nan_to_num(y_f, nan=0.0, posinf=0.0, neginf=0.0)
+    y = np.rint(y).astype(np.int32, copy=False)
+    w_raw = np.nan_to_num(w_raw, nan=1.0, posinf=1.0, neginf=1.0).astype(np.float32, copy=False)
+    if remap_weight2_positive_label_to_zero:
+        y = y.copy()
+        soft = (y == 1) & np.isclose(w_raw, np.float32(2.0), rtol=0.0, atol=1e-5)
+        y[soft] = 0
+    w = remap_sample_weight_from_dataset(w_raw)
+    return y, w
+
+
+def _prepare_batch_from_recordbatch(
+    rb: pa.RecordBatch,
+    mask: np.ndarray,
+    nfeat: int,
+    j_target: int,
+    j_sw: int,
+    *,
+    remap_weight2_positive_label_to_zero: bool,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    cols = [_arrow_array_to_float64(rb.column(j)) for j in range(nfeat)]
+    x = np.column_stack(cols)[mask].astype(np.float32, copy=False)
+    y_f = _arrow_array_to_float64(rb.column(j_target))
+    w_f = _arrow_array_to_float64(rb.column(j_sw))
+    y, w = _finalize_yw(y_f[mask], w_f[mask], remap_weight2_positive_label_to_zero=remap_weight2_positive_label_to_zero)
     return x, y, w
 
 
@@ -113,14 +165,14 @@ def _count_val_rows(
     tr_amount_upper_inclusive: float | None = None,
     batch_size: int = 2_500_000,
 ) -> int:
-    """Число val-строк (дttm >= cutoff по маске ~train), один столбец — лёгкий скан."""
+    """Число val-строк (dttm >= cutoff по маске ~train); без полного DataFrame на батч."""
     pf = pq.ParquetFile(path)
     n_val = 0
     for rb in pf.iter_batches(columns=[dttm_col, tr_amount_col], batch_size=batch_size):
-        dfb = rb.to_pandas()
-        s = pd.to_datetime(dfb[dttm_col], errors="coerce")
-        mask = ~(s < cutoff_day)
-        tr_values = pd.to_numeric(dfb[tr_amount_col], errors="coerce")
+        s = pd.to_datetime(rb.column(0).to_pandas(), errors="coerce")
+        before = (s < cutoff_day).to_numpy(dtype=np.bool_, copy=False)
+        mask = ~before
+        tr_values = pd.to_numeric(rb.column(1).to_pandas(), errors="coerce").to_numpy(dtype=np.float64, copy=False)
         if tr_amount_lower_exclusive is not None:
             mask &= tr_values > float(tr_amount_lower_exclusive)
         if tr_amount_upper_inclusive is not None:
@@ -219,6 +271,14 @@ class ParquetTrainValDataIter(DataIter):
         self._tr_amount_upper_inclusive = tr_amount_upper_inclusive
         self._remap_weight2_positive_label_to_zero = remap_weight2_positive_label_to_zero
         self._cols = feature_cols + ["target", "sample_weight", dttm_col]
+        self._nfeat = len(feature_cols)
+        try:
+            self._j_tr = feature_cols.index(tr_amount_col)
+        except ValueError as e:
+            raise ValueError("tr_amount_col должен входить в feature_cols") from e
+        self._j_target = self._nfeat
+        self._j_sw = self._nfeat + 1
+        self._j_dttm = self._nfeat + 2
         self._batch_iter = None
         if cache_prefix is not None:
             super().__init__(cache_prefix=cache_prefix, release_data=True)
@@ -236,19 +296,24 @@ class ParquetTrainValDataIter(DataIter):
                 rb = next(self._batch_iter)
             except StopIteration:
                 return False
-            dfb = rb.to_pandas()
-            dttm = pd.to_datetime(dfb[self._dttm_col], errors="coerce")
-            mask = dttm < self._cutoff_day if train_mode else ~(dttm < self._cutoff_day)
-            tr_values = pd.to_numeric(dfb[self._tr_amount_col], errors="coerce")
+            if rb.num_rows == 0:
+                continue
+            dttm_series = pd.to_datetime(rb.column(self._j_dttm).to_pandas(), errors="coerce")
+            before_cutoff = (dttm_series < self._cutoff_day).to_numpy(dtype=np.bool_, copy=False)
+            mask = before_cutoff if train_mode else ~before_cutoff
+            tr = _arrow_array_to_float64(rb.column(self._j_tr))
             if self._tr_amount_lower_exclusive is not None:
-                mask &= tr_values > float(self._tr_amount_lower_exclusive)
+                mask = mask & (tr > float(self._tr_amount_lower_exclusive))
             if self._tr_amount_upper_inclusive is not None:
-                mask &= tr_values <= float(self._tr_amount_upper_inclusive)
+                mask = mask & (tr <= float(self._tr_amount_upper_inclusive))
             if not mask.any():
                 continue
-            x, y, w = _prepare_batch(
-                dfb.loc[mask],
-                self._feature_cols,
+            x, y, w = _prepare_batch_from_recordbatch(
+                rb,
+                mask,
+                self._nfeat,
+                self._j_target,
+                self._j_sw,
                 remap_weight2_positive_label_to_zero=self._remap_weight2_positive_label_to_zero,
             )
             input_data(

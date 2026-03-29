@@ -57,8 +57,10 @@ XGB_PARAMS = {
 XGB_EARLY_STOPPING_ROUNDS = 50  # 0 — только evals, без остановки
 XGB_EVAL_VERBOSE_EVERY = 50  # печать каждые N раундов; 0 — тихо
 
-# Размер батча pyarrow при чтении parquet для QuantileDMatrix + DataIter (training/main.py)
-XGB_EXTERNAL_PARQUET_BATCH_ROWS = 1_000_000
+# Размер батча pyarrow при чтении parquet для QuantileDMatrix + DataIter (training/main.py).
+# Больше — меньше вызовов итератора и накладных расходов, выше пик RAM на батч (~n_rows * n_features * 4 байт
+# для float32 X плюс служебное). Типичный диапазон 500k–2M; при OOM уменьшить.
+XGB_EXTERNAL_PARQUET_BATCH_ROWS = 2_000_000
 
 
 def _load_xgb_hyperparams_from_grid_search() -> dict[str, float | int]:
