@@ -61,11 +61,12 @@ data/
 - data/train_labels.parquet.
 
 Выход:
-- output/train_dataset_part_0.parquet, train_dataset_part_1.parquet, … (потоковые части).
+- output/full_dataset.parquet (основной путь; см. shared/config.py TRAIN_DATASET_PATH); опционально legacy output/train_dataset_part_*.parquet при другом пайплайне.
 
 Логика (см. также dataset_cpp/dataset_cpp_module_spec.txt):
 - читает train_labels.parquet, строит event_id → исходный target (для sample_weight);
-- по pretrain наполняет скользящие окна по customer_id (до 150 последних транзакций);
+- для k=1..3: pretrain_part_k наполняет окна когорты k, затем train_part_k пишет строки датасета и обновляет окна; после train_part_k записи когорты удаляются из map (экономия памяти; корректно, если customer_id с разными номерами частей не пересекаются);
+- скользящее окно по customer_id: до kWindowCap (512) последних транзакций;
 - по train: для каждой строки с непустым customer_id — фичи по окну до строки → запись в датасет → update окна;
 - target в датасете: 1, если event_id есть в train_labels.parquet, иначе 0;
 - sample_weight: WEIGHT_UNLABELED / WEIGHT_LABELED_0 / WEIGHT_LABELED_1 (как в shared/config.py).

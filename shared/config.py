@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 import numpy as np
+import pandas as pd
 
 from shared.dataset_settings import DATASET_MODE, WINDOW_TRANSACTIONS, WINDOW_TRANSACTIONS_MODE
 from shared.features import FEATURE_NAMES
@@ -79,6 +80,55 @@ MODEL_TORCH_MLP_PATH = OUTPUT_DIR / "weights" / "model_torch_mlp.pt"
 
 # Все фичи датасета в порядке FEATURE_NAMES (обучение и submission).
 MODEL_INPUT_FEATURES: list[str] = list(FEATURE_NAMES)
+
+
+def validate_model_input_dataframe(X: pd.DataFrame) -> None:
+    """
+    Инференс: порядок и имена колонок должны совпадать с обучением
+    (как dfb[feature_cols] в training/main.py и заголовок TSV в CatBoost).
+    """
+    expected = MODEL_INPUT_FEATURES
+    n_exp = len(expected)
+    if X.shape[1] != n_exp:
+        raise ValueError(
+            f"Матрица признаков: колонок {X.shape[1]}, ожидалось {n_exp} (MODEL_INPUT_FEATURES). "
+            "Пересоберите датасет и модель при смене FEATURE_NAMES."
+        )
+    actual = list(X.columns)
+    if actual != expected:
+        for i, pair in enumerate(zip(actual, expected)):
+            a, e = pair
+            if a != e:
+                raise ValueError(
+                    f"Колонка #{i}: получено '{a}', ожидалось '{e}'. "
+                    "Используйте X = pd.DataFrame(rows)[MODEL_INPUT_FEATURES] после compute_features."
+                )
+        raise ValueError("Набор колонок X не совпадает с MODEL_INPUT_FEATURES.")
+
+
+def validate_xgboost_booster_feature_count(booster: Any) -> None:
+    """Совпадение числа признаков с текущим MODEL_INPUT_FEATURES (после load_model)."""
+    expected_n = len(MODEL_INPUT_FEATURES)
+    try:
+        nf = int(booster.num_features())
+    except (AttributeError, TypeError, ValueError):
+        return
+    if nf != expected_n:
+        raise ValueError(
+            f"XGBoost: booster.num_features()={nf}, в коде len(MODEL_INPUT_FEATURES)={expected_n}. "
+            "Переобучите модели на актуальном full_dataset.parquet."
+        )
+
+
+def validate_catboost_classifier_features(model: Any) -> None:
+    """Если CatBoost сохранил имена признаков — сверяем длину с MODEL_INPUT_FEATURES."""
+    expected_n = len(MODEL_INPUT_FEATURES)
+    fn = getattr(model, "feature_names_", None)
+    if fn is not None and len(fn) != expected_n:
+        raise ValueError(
+            f"CatBoost: в модели {len(fn)} признаков, в коде MODEL_INPUT_FEATURES={expected_n}. "
+            "Переобучите CatBoost на актуальном датасете."
+        )
 
 
 def resolve_model_input_columns(parquet_schema_names: Sequence[str]) -> list[str]:

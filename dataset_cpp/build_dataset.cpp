@@ -3,6 +3,9 @@
 // История: deque не длиннее kWindowCap; фичи — по суффиксу длины min(stored, W),
 // где W сэмплируется из эмпирического распределения "транзакций на пользователя" из data/test/pretest.parquet.
 // target = 1 если event_id в train_labels.parquet, иначе 0.
+// Порядок обхода: для k=1,2,3 подряд pretrain_part_k → train_part_k; после train_part_k из map
+// удаляются все customer_id, встреченные в этой паре файлов (когорты по номеру части не пересекаются).
+// В выходном parquet строки по-прежнему в порядке train_part_1, train_part_2, train_part_3.
 // Запуск из корня репозитория: ./build_dataset [repo_root]
 
 #ifndef _GNU_SOURCE
@@ -22,6 +25,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -130,6 +134,58 @@ static const char* kFeatureNames[] = {
     "mcc_event_descr_pair_new",
     "high_amount_ratio_last_24h",
     "amount_relative_to_mcc_median_5_days",
+    "amount_ratio_to_window_median",
+    "amount_iqr_normalized",
+    "amount_cv_in_window",
+    "sum_amount_last_10m",
+    "transactions_last_1h",
+    "unique_mcc_count_suffix",
+    "unique_device_key_count_suffix",
+    "unique_channel_key_count_suffix",
+    "unique_timezone_count_suffix",
+    "unique_browser_language_count_suffix",
+    "mcc_switch_count_last_20_tx",
+    "device_switch_count_last_20_tx",
+    "channel_switch_count_last_20_tx",
+    "night_transaction_share_last_24h",
+    "distinct_hours_active_last_24h",
+    "mean_amount_last_3_transactions",
+    "amount_ratio_to_min_amount_24h",
+    "compromised_history_count_suffix",
+    "seconds_since_last_compromised_tx",
+    "web_rdp_count_last_24h",
+    "voip_flag_count_last_24h",
+    "channel_relative_freq",
+    "timezone_relative_freq",
+    "browser_language_relative_freq",
+    "event_type_nm_share_in_suffix",
+    "mcc_consecutive_streak_length",
+    "transactions_last_5m",
+    "mean_gap_seconds_last_5_intervals",
+    "suffix_time_span_hours_log1p",
+    "transactions_per_span_hour",
+    "mcc_amount_std_same_5d",
+    "weekend_transaction_share_last_7d",
+    "distinct_event_descr_count_last_24h_norm",
+    "is_new_timezone",
+    "is_timezone_change",
+    "currency_iso_cd_cat",
+    "pos_cd_cat",
+    "accept_language_cat",
+    "battery_level",
+    "battery_very_low_flag",
+    "screen_size_cat",
+    "developer_tools_flag",
+    "accept_lang_browser_lang_mismatch",
+    "battery_very_low_and_night",
+    "amount_diff_prev",
+    "amount_ratio_prev",
+    "amount_change_sign",
+    "amount_increase_streak_suffix",
+    "amount_decrease_streak_suffix",
+    "is_new_session_id",
+    "session_switch_count_last_20_tx",
+    "seconds_since_session_start_in_window",
 };
 constexpr int kNumFeatures = sizeof(kFeatureNames) / sizeof(kFeatureNames[0]);
 
@@ -439,6 +495,12 @@ static const SchemaColumnSpec kTrainParquetColumns[] = {
     {"event_type_nm", false, ColTypeExpect::kAmount},
     {"event_descr", false, ColTypeExpect::kText},
     {"event_desc", false, ColTypeExpect::kText},
+    {"currency_iso_cd", false, ColTypeExpect::kText},
+    {"pos_cd", false, ColTypeExpect::kText},
+    {"accept_language", false, ColTypeExpect::kText},
+    {"battery", false, ColTypeExpect::kAmount},
+    {"screen_size", false, ColTypeExpect::kText},
+    {"developer_tools", false, ColTypeExpect::kText},
 };
 
 static const SchemaColumnSpec kLabelsParquetColumns[] = {
@@ -1048,16 +1110,329 @@ static FeatureRow compute_features(const UserWindow& w, int effective_target_len
   const double tr_am = static_cast<double>(eff);
   const double log_1p_tx = std::log1p(std::max(0.0, tr_am));
 
+  std::string compromised_s = trim_copy(get_row_s("compromised"));
+  double compromised_flag = 0.0;
+  if (!compromised_s.empty()) {
+    if (auto pc = parse_double_any(compromised_s)) compromised_flag = (*pc == 1.0) ? 1.0 : 0.0;
+  }
+
   double tx_10m = static_cast<double>(count_since(std::chrono::minutes(10)));
   double tx_1h = static_cast<double>(count_since(std::chrono::hours(1)));
   double tx_24h = static_cast<double>(count_since(std::chrono::hours(24)));
   double sum_1h = sum_since(std::chrono::hours(1));
   double sum_24h = sum_since(std::chrono::hours(24));
+  double sum_amount_last_10m = sum_since(std::chrono::minutes(10));
+  double tx_5m = static_cast<double>(count_since(std::chrono::minutes(5)));
 
-  std::string compromised_s = trim_copy(get_row_s("compromised"));
-  double compromised_flag = 0.0;
-  if (!compromised_s.empty()) {
-    if (auto pc = parse_double_any(compromised_s)) compromised_flag = (*pc == 1.0) ? 1.0 : 0.0;
+  double amount_iqr_normalized = nan_val();
+  if (n_amt >= 2 && std::isfinite(amount)) {
+    std::vector<double> s_iqr = amounts;
+    std::sort(s_iqr.begin(), s_iqr.end());
+    size_t i25 = (n_amt - 1) / 4;
+    size_t i75 = (3 * (n_amt - 1)) / 4;
+    double q25 = s_iqr[i25];
+    double q75 = s_iqr[i75];
+    double iqr = q75 - q25;
+    double denom = (std::abs(iqr) < kEps) ? kEps : iqr;
+    amount_iqr_normalized = (amount - q25) / denom;
+  }
+
+  double amount_cv_in_window = nan_val();
+  if (std::isfinite(mean) && std::abs(mean) > kEps && std::isfinite(stdv)) amount_cv_in_window = stdv / mean;
+
+  std::unordered_set<std::string> umcc, udev, uch, utz, ubl;
+  for (int k = start; k < sz; ++k) {
+    const auto& t = w.dq[static_cast<size_t>(k)];
+    std::string mc = trim_copy(t.mcc);
+    if (!mc.empty()) umcc.insert(mc);
+    std::string dk = t.os_type + "\x1f" + t.dev_ver;
+    if (!empty_field(t.os_type) || !empty_field(t.dev_ver)) udev.insert(dk);
+    std::string ck = t.ch_type + "\x1f" + t.ch_sub;
+    if (!empty_field(t.ch_type) || !empty_field(t.ch_sub)) uch.insert(ck);
+    std::string tzs = trim_copy(t.tz);
+    if (!tzs.empty()) utz.insert(tzs);
+    std::string bls = trim_copy(t.browser_language);
+    if (!bls.empty()) ubl.insert(bls);
+  }
+
+  int Lsw = std::min(20, eff);
+  int mcc_switch_cnt = 0;
+  int dev_switch_cnt = 0;
+  int ch_switch_cnt = 0;
+  if (Lsw >= 2) {
+    int from = sz - Lsw;
+    for (int i = from; i < sz - 1; ++i) {
+      const auto& a = w.dq[static_cast<size_t>(i)];
+      const auto& b = w.dq[static_cast<size_t>(i + 1)];
+      if (trim_copy(a.mcc) != trim_copy(b.mcc)) ++mcc_switch_cnt;
+      if (a.os_type + "\x1f" + a.dev_ver != b.os_type + "\x1f" + b.dev_ver) ++dev_switch_cnt;
+      if (a.ch_type + "\x1f" + a.ch_sub != b.ch_type + "\x1f" + b.ch_sub) ++ch_switch_cnt;
+    }
+  }
+
+  double night_share_24h = 0.0;
+  double distinct_hours_24h = 0.0;
+  if (dttm.has_value()) {
+    auto thr24 = *dttm - std::chrono::hours(24);
+    int cnt24 = 0;
+    int night24 = 0;
+    std::unordered_set<int> hrs;
+    for (int k = start; k < sz; ++k) {
+      const auto& t = w.dq[static_cast<size_t>(k)];
+      if (!t.dttm.has_value() || *t.dttm < thr24) continue;
+      ++cnt24;
+      int h = t.hour_val;
+      if (h >= 0 && h <= 23) hrs.insert(h);
+      if (h >= 22 || h < 6) ++night24;
+    }
+    if (cnt24 > 0) night_share_24h = static_cast<double>(night24) / static_cast<double>(cnt24);
+    distinct_hours_24h = static_cast<double>(hrs.size()) / 24.0;
+  }
+
+  double amount_ratio_to_min_amount_24h = nan_val();
+  if (dttm.has_value() && std::isfinite(amount)) {
+    auto thr24 = *dttm - std::chrono::hours(24);
+    double amin = nan_val();
+    for (int k = start; k < sz; ++k) {
+      const auto& t = w.dq[static_cast<size_t>(k)];
+      if (!t.dttm.has_value() || *t.dttm < thr24) continue;
+      if (!t.amount.has_value() || !std::isfinite(*t.amount)) continue;
+      if (!std::isfinite(amin) || *t.amount < amin) amin = *t.amount;
+    }
+    if (std::isfinite(amin) && amin > kEps) amount_ratio_to_min_amount_24h = amount / amin;
+  }
+
+  int compromised_hist = 0;
+  double secs_since_compromised = nan_val();
+  if (dttm.has_value()) {
+    for (int k = start; k < sz; ++k) {
+      const auto& t = w.dq[static_cast<size_t>(k)];
+      if (auto pc = parse_double_any(trim_copy(t.compromised))) {
+        if (*pc == 1.0) ++compromised_hist;
+      }
+    }
+    for (int k = sz - 1; k >= start; --k) {
+      const auto& t = w.dq[static_cast<size_t>(k)];
+      if (auto pc = parse_double_any(trim_copy(t.compromised))) {
+        if (*pc == 1.0 && t.dttm.has_value()) {
+          secs_since_compromised =
+              static_cast<double>(std::chrono::duration_cast<std::chrono::seconds>(*dttm - *t.dttm).count());
+          break;
+        }
+      }
+    }
+  }
+
+  int web_rdp_cnt_24h = 0;
+  int voip_cnt_24h = 0;
+  if (dttm.has_value()) {
+    auto thr24 = *dttm - std::chrono::hours(24);
+    for (int k = start; k < sz; ++k) {
+      const auto& t = w.dq[static_cast<size_t>(k)];
+      if (!t.dttm.has_value() || *t.dttm < thr24) continue;
+      if (!empty_field(t.web_rdp)) ++web_rdp_cnt_24h;
+      if (!empty_field(t.voip)) ++voip_cnt_24h;
+    }
+  }
+
+  double channel_rel_freq = (eff > 0) ? (static_cast<double>(channel_count_i) / static_cast<double>(eff)) : nan_val();
+  double tz_rel_freq = (eff > 0) ? (static_cast<double>(timezone_count_i) / static_cast<double>(eff)) : nan_val();
+  double bl_rel_freq = (eff > 0) ? (static_cast<double>(bl_count_i) / static_cast<double>(eff)) : nan_val();
+
+  double event_type_nm_share_suffix = 0.0;
+  if (eff > 0 && std::isfinite(event_type_nm_feat)) {
+    int match = 0;
+    for (int k = start; k < sz; ++k) {
+      const auto& t = w.dq[static_cast<size_t>(k)];
+      if (auto p = parse_double_any(trim_copy(t.event_type_nm))) {
+        if (std::isfinite(*p) && *p == event_type_nm_feat) ++match;
+      }
+    }
+    event_type_nm_share_suffix = static_cast<double>(match) / static_cast<double>(eff);
+  }
+
+  double mcc_streak = 0.0;
+  if (!mcc_trim.empty()) {
+    int st = 0;
+    for (int k = sz - 1; k >= start; --k) {
+      if (trim_copy(w.dq[static_cast<size_t>(k)].mcc) == mcc_trim)
+        ++st;
+      else
+        break;
+    }
+    mcc_streak = static_cast<double>(st);
+  }
+
+  double mean_gap_last_5 = nan_val();
+  if (!deltas.empty()) {
+    size_t n5 = std::min<size_t>(5, deltas.size());
+    double sg = 0.0;
+    for (size_t j = deltas.size() - n5; j < deltas.size(); ++j) sg += deltas[j];
+    mean_gap_last_5 = sg / static_cast<double>(n5);
+  }
+
+  std::optional<clock::time_point> span_min, span_max;
+  for (int k = start; k < sz; ++k) {
+    const auto& t = w.dq[static_cast<size_t>(k)];
+    if (!t.dttm.has_value()) continue;
+    if (!span_min.has_value() || *t.dttm < *span_min) span_min = t.dttm;
+    if (!span_max.has_value() || *t.dttm > *span_max) span_max = t.dttm;
+  }
+  double suffix_span_log1p = nan_val();
+  double tx_per_span_hour = nan_val();
+  if (span_min.has_value() && span_max.has_value() && eff > 0) {
+    double sec_span =
+        static_cast<double>(std::chrono::duration_cast<std::chrono::seconds>(*span_max - *span_min).count());
+    double hours = sec_span / 3600.0;
+    if (hours < kEps) hours = kEps;
+    suffix_span_log1p = std::log1p(std::max(0.0, sec_span / 3600.0));
+    tx_per_span_hour = static_cast<double>(eff) / hours;
+  }
+
+  double mcc_std_5d = nan_val();
+  if (dttm.has_value() && !mcc_trim.empty()) {
+    auto thr5 = *dttm - std::chrono::hours(24 * 5);
+    std::vector<double> mv;
+    for (int k = start; k < sz; ++k) {
+      const auto& t = w.dq[static_cast<size_t>(k)];
+      if (!t.dttm.has_value() || *t.dttm < thr5) continue;
+      if (!t.amount.has_value() || !std::isfinite(*t.amount)) continue;
+      if (trim_copy(t.mcc) != mcc_trim) continue;
+      mv.push_back(*t.amount);
+    }
+    if (mv.size() >= 2) {
+      double sm = 0.0;
+      for (double v : mv) sm += v;
+      sm /= static_cast<double>(mv.size());
+      double sq = 0.0;
+      for (double v : mv) {
+        double z = v - sm;
+        sq += z * z;
+      }
+      mcc_std_5d = std::sqrt(std::max(0.0, sq / static_cast<double>(mv.size() - 1)));
+    }
+  }
+
+  double weekend_share_7d = 0.0;
+  if (dttm.has_value()) {
+    auto thr7 = *dttm - std::chrono::hours(24 * 7);
+    int c7 = 0;
+    int wk = 0;
+    for (int k = start; k < sz; ++k) {
+      const auto& t = w.dq[static_cast<size_t>(k)];
+      if (!t.dttm.has_value() || *t.dttm < thr7) continue;
+      ++c7;
+      if (t.dow_py >= 5) ++wk;
+    }
+    if (c7 > 0) weekend_share_7d = static_cast<double>(wk) / static_cast<double>(c7);
+  }
+
+  double descr_div_24h = 0.0;
+  if (dttm.has_value()) {
+    auto thr24 = *dttm - std::chrono::hours(24);
+    std::unordered_set<std::string> dset;
+    int cntd = 0;
+    for (int k = start; k < sz; ++k) {
+      const auto& t = w.dq[static_cast<size_t>(k)];
+      if (!t.dttm.has_value() || *t.dttm < thr24) continue;
+      ++cntd;
+      std::string ds = trim_copy(t.event_descr);
+      if (!ds.empty()) dset.insert(ds);
+    }
+    int denom = std::max(1, cntd);
+    descr_div_24h = static_cast<double>(dset.size()) / static_cast<double>(denom);
+  }
+
+  std::string cur_currency = trim_copy(get_row_s("currency_iso_cd"));
+  std::string cur_pos = trim_copy(get_row_s("pos_cd"));
+  std::string cur_accept = trim_copy(get_row_s("accept_language"));
+  std::string cur_screen = trim_copy(get_row_s("screen_size"));
+  std::string cur_devtools = trim_copy(get_row_s("developer_tools"));
+
+  double battery_level_feat = nan_val();
+  int bat_col = col_index(sch, "battery");
+  if (bat_col >= 0) {
+    if (auto pb = col_get_optional_double(*batch.column(bat_col), i)) battery_level_feat = *pb;
+  }
+  if (!std::isfinite(battery_level_feat)) {
+    if (auto pb2 = parse_double_any(trim_copy(get_row_s("battery")))) battery_level_feat = *pb2;
+  }
+
+  double battery_very_low = 0.0;
+  if (std::isfinite(battery_level_feat)) {
+    if (battery_level_feat >= 0.0 && battery_level_feat <= 1.0 && battery_level_feat < 0.2) battery_very_low = 1.0;
+    if (battery_level_feat > 1.0 && battery_level_feat <= 100.0 && battery_level_feat < 20.0) battery_very_low = 1.0;
+  }
+
+  double devtools_flag = 0.0;
+  if (!empty_field(cur_devtools)) {
+    if (auto pd = parse_double_any(cur_devtools)) {
+      devtools_flag = (*pd != 0.0 && std::isfinite(*pd)) ? 1.0 : 0.0;
+    } else {
+      std::string x = cur_devtools;
+      for (auto& c : x) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+      if (x == "false" || x == "no" || x == "off" || x == "0")
+        devtools_flag = 0.0;
+      else
+        devtools_flag = 1.0;
+    }
+  }
+
+  std::string bl_trim_row = trim_copy(bl_c);
+  double lang_mismatch = 0.0;
+  if (!empty_field(cur_accept) && !empty_field(bl_trim_row) && cur_accept != bl_trim_row) lang_mismatch = 1.0;
+
+  double bat_low_x_night = 0.0;
+  if (battery_very_low > 0.5 && std::isfinite(is_night) && is_night == 1.0) bat_low_x_night = 1.0;
+
+  double amount_change_sign = nan_val();
+  if (std::isfinite(amount_diff_prev)) {
+    if (std::abs(amount_diff_prev) < kEps)
+      amount_change_sign = 0.0;
+    else if (amount_diff_prev > 0.0)
+      amount_change_sign = 1.0;
+    else
+      amount_change_sign = -1.0;
+  }
+
+  int amount_inc_streak = 0;
+  int amount_dec_streak = 0;
+  if (amounts.size() >= 2) {
+    int j = static_cast<int>(amounts.size()) - 1;
+    while (j >= 1 && amounts[static_cast<size_t>(j)] > amounts[static_cast<size_t>(j - 1)]) {
+      ++amount_inc_streak;
+      --j;
+    }
+    j = static_cast<int>(amounts.size()) - 1;
+    while (j >= 1 && amounts[static_cast<size_t>(j)] < amounts[static_cast<size_t>(j - 1)]) {
+      ++amount_dec_streak;
+      --j;
+    }
+  }
+
+  double is_new_sess_id = 0.0;
+  if (!sid_c.empty()) is_new_sess_id = (n_sess == 0) ? 1.0 : 0.0;
+
+  int session_switch_cnt = 0;
+  int Lsess = std::min(20, eff);
+  if (Lsess >= 2) {
+    int from_s = sz - Lsess;
+    for (int ii = from_s; ii < sz - 1; ++ii) {
+      const auto& ta = w.dq[static_cast<size_t>(ii)];
+      const auto& tb = w.dq[static_cast<size_t>(ii + 1)];
+      if (ta.session_id != tb.session_id) ++session_switch_cnt;
+    }
+  }
+
+  double seconds_since_sess_start = nan_val();
+  if (dttm.has_value() && !sid_c.empty()) {
+    auto it0 = sess_first_dttm.find(sid_c);
+    if (it0 != sess_first_dttm.end()) {
+      seconds_since_sess_start =
+          static_cast<double>(std::chrono::duration_cast<std::chrono::seconds>(*dttm - it0->second).count());
+    } else {
+      seconds_since_sess_start = 0.0;
+    }
   }
 
   int fi = 0;
@@ -1117,6 +1492,58 @@ static FeatureRow compute_features(const UserWindow& w, int effective_target_len
   put(mcc_event_descr_pair_new);
   put(high_amount_ratio_last_24h);
   put(amount_relative_to_mcc_median_5_days);
+  put(amount_to_median);
+  put(amount_iqr_normalized);
+  put(amount_cv_in_window);
+  put(sum_amount_last_10m);
+  put(tx_1h);
+  put(static_cast<double>(umcc.size()));
+  put(static_cast<double>(udev.size()));
+  put(static_cast<double>(uch.size()));
+  put(static_cast<double>(utz.size()));
+  put(static_cast<double>(ubl.size()));
+  put(static_cast<double>(mcc_switch_cnt));
+  put(static_cast<double>(dev_switch_cnt));
+  put(static_cast<double>(ch_switch_cnt));
+  put(night_share_24h);
+  put(distinct_hours_24h);
+  put(mean_last_3);
+  put(amount_ratio_to_min_amount_24h);
+  put(static_cast<double>(compromised_hist));
+  put(secs_since_compromised);
+  put(static_cast<double>(web_rdp_cnt_24h));
+  put(static_cast<double>(voip_cnt_24h));
+  put(channel_rel_freq);
+  put(tz_rel_freq);
+  put(bl_rel_freq);
+  put(event_type_nm_share_suffix);
+  put(mcc_streak);
+  put(tx_5m);
+  put(mean_gap_last_5);
+  put(suffix_span_log1p);
+  put(tx_per_span_hour);
+  put(mcc_std_5d);
+  put(weekend_share_7d);
+  put(descr_div_24h);
+  put(is_new_timezone);
+  put(is_timezone_change);
+  put(cat_from_utf8(cur_currency));
+  put(cat_from_utf8(cur_pos));
+  put(cat_from_utf8(cur_accept));
+  put(battery_level_feat);
+  put(battery_very_low);
+  put(cat_from_utf8(cur_screen));
+  put(devtools_flag);
+  put(lang_mismatch);
+  put(bat_low_x_night);
+  put(amount_diff_prev);
+  put(amount_ratio_prev);
+  put(amount_change_sign);
+  put(static_cast<double>(amount_inc_streak));
+  put(static_cast<double>(amount_dec_streak));
+  put(is_new_sess_id);
+  put(static_cast<double>(session_switch_cnt));
+  put(seconds_since_sess_start);
   if (fi != kNumFeatures) {
     throw std::runtime_error("feature vector size mismatch");
   }
@@ -1332,7 +1759,8 @@ static arrow::Result<WindowTargetSampler> build_sampler_from_pretest(const std::
 static arrow::Status process_file(const std::string& path, bool is_train,
                                   std::unordered_map<std::string, UserWindow>* win_map,
                                   const std::unordered_map<int64_t, int>& labels, const WindowTargetSampler& sampler,
-                                  DatasetWriter* wr) {
+                                  DatasetWriter* wr,
+                                  std::unordered_set<std::string>* cohort_customer_ids = nullptr) {
   arrow::MemoryPool* pool = arrow::default_memory_pool();
   ARROW_ASSIGN_OR_RAISE(auto infile, arrow::io::ReadableFile::Open(path));
   ARROW_ASSIGN_OR_RAISE(auto reader, parquet::arrow::OpenFile(infile, pool));
@@ -1361,6 +1789,7 @@ static arrow::Status process_file(const std::string& path, bool is_train,
     for (int64_t i = 0; i < n; ++i) {
       std::string ck = col_get_str(col_c, i);
       if (ck.empty()) continue;
+      if (cohort_customer_ids != nullptr) cohort_customer_ids->insert(ck);
       UserWindow& w = (*win_map)[ck];
       if (is_train) {
         int64_t eid_row = 0;
@@ -1433,34 +1862,46 @@ int main(int argc, char** argv) {
   DatasetWriter wr(out_path);
   std::unordered_map<std::string, UserWindow> windows;
 
-  log_msg("phase: pretrain files (window fill, no dataset rows)");
-  for (const auto& p : pre) {
-    std::ifstream f(p);
-    if (!f.good()) {
-      log_msg("skip missing: " + p);
-      continue;
+  log_msg("phase: for each k=1..3: pretrain_part_k (window only) → train_part_k (dataset) → evict cohort");
+  for (int part = 0; part < 3; ++part) {
+    std::unordered_set<std::string> cohort_ids;
+    cohort_ids.reserve(65536);
+    const std::string& pre_path = pre[part];
+    const std::string& tr_path = tr[part];
+
+    {
+      std::ifstream fp(pre_path);
+      if (!fp.good()) {
+        log_msg("skip missing pretrain: " + pre_path);
+      } else {
+        auto st = process_file(pre_path, false, &windows, labels_orig, sampler, &wr, &cohort_ids);
+        if (!st.ok()) {
+          std::cerr << "[build_dataset] " << st.ToString() << "\n";
+          return 1;
+        }
+      }
     }
-    auto st = process_file(p, false, &windows, labels_orig, sampler, &wr);
-    if (!st.ok()) {
-      std::cerr << "[build_dataset] " << st.ToString() << "\n";
-      return 1;
+    {
+      std::ifstream ft(tr_path);
+      if (!ft.good()) {
+        log_msg("skip missing train: " + tr_path);
+      } else {
+        auto st = process_file(tr_path, true, &windows, labels_orig, sampler, &wr, &cohort_ids);
+        if (!st.ok()) {
+          std::cerr << "[build_dataset] " << st.ToString() << "\n";
+          return 1;
+        }
+      }
     }
-  }
-  log_msg("phase: train files (dataset rows + window)");
-  for (const auto& p : tr) {
-    std::ifstream f(p);
-    if (!f.good()) {
-      log_msg("skip missing: " + p);
-      continue;
+    size_t erased = 0;
+    for (const auto& id : cohort_ids) {
+      if (windows.erase(id) > 0) ++erased;
     }
-    auto st = process_file(p, true, &windows, labels_orig, sampler, &wr);
-    if (!st.ok()) {
-      std::cerr << "[build_dataset] " << st.ToString() << "\n";
-      return 1;
-    }
+    log_msg("part " + std::to_string(part + 1) + " cohort_unique_customers=" + std::to_string(cohort_ids.size()) +
+            " erased_from_map=" + std::to_string(erased) + " windows_remaining=" + std::to_string(windows.size()));
   }
   log_msg("final flush/close output parquet …");
   if (!wr.close().ok()) return 1;
-  log_msg("Done. unique customers in window map: " + std::to_string(windows.size()));
+  log_msg("Done. unique customers in window map (expect 0): " + std::to_string(windows.size()));
   return 0;
 }

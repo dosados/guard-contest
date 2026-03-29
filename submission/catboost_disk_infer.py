@@ -33,6 +33,7 @@ from shared.config import (
     OUTPUT_DIR,
     PRETEST_PATH,
     TEST_PATH,
+    validate_catboost_classifier_features,
 )
 from shared.features import compute_features
 from shared.parquet_batch_aggregates import (
@@ -103,6 +104,7 @@ def run_catboost_disk_submission(out_path: Path | None = None, *, chunk_rows: in
 
     model = CatBoostClassifier()
     model.load_model(str(MODEL_PATH))
+    validate_catboost_classifier_features(model)
 
     event_ids: list[int] = []
     logits_parts: list[np.ndarray] = []

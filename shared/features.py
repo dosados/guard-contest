@@ -79,6 +79,58 @@ FEATURE_NAMES: list[str] = [
     "mcc_event_descr_pair_new",
     "high_amount_ratio_last_24h",
     "amount_relative_to_mcc_median_5_days",
+    "amount_ratio_to_window_median",
+    "amount_iqr_normalized",
+    "amount_cv_in_window",
+    "sum_amount_last_10m",
+    "transactions_last_1h",
+    "unique_mcc_count_suffix",
+    "unique_device_key_count_suffix",
+    "unique_channel_key_count_suffix",
+    "unique_timezone_count_suffix",
+    "unique_browser_language_count_suffix",
+    "mcc_switch_count_last_20_tx",
+    "device_switch_count_last_20_tx",
+    "channel_switch_count_last_20_tx",
+    "night_transaction_share_last_24h",
+    "distinct_hours_active_last_24h",
+    "mean_amount_last_3_transactions",
+    "amount_ratio_to_min_amount_24h",
+    "compromised_history_count_suffix",
+    "seconds_since_last_compromised_tx",
+    "web_rdp_count_last_24h",
+    "voip_flag_count_last_24h",
+    "channel_relative_freq",
+    "timezone_relative_freq",
+    "browser_language_relative_freq",
+    "event_type_nm_share_in_suffix",
+    "mcc_consecutive_streak_length",
+    "transactions_last_5m",
+    "mean_gap_seconds_last_5_intervals",
+    "suffix_time_span_hours_log1p",
+    "transactions_per_span_hour",
+    "mcc_amount_std_same_5d",
+    "weekend_transaction_share_last_7d",
+    "distinct_event_descr_count_last_24h_norm",
+    "is_new_timezone",
+    "is_timezone_change",
+    "currency_iso_cd_cat",
+    "pos_cd_cat",
+    "accept_language_cat",
+    "battery_level",
+    "battery_very_low_flag",
+    "screen_size_cat",
+    "developer_tools_flag",
+    "accept_lang_browser_lang_mismatch",
+    "battery_very_low_and_night",
+    "amount_diff_prev",
+    "amount_ratio_prev",
+    "amount_change_sign",
+    "amount_increase_streak_suffix",
+    "amount_decrease_streak_suffix",
+    "is_new_session_id",
+    "session_switch_count_last_20_tx",
+    "seconds_since_session_start_in_window",
 ]
 
 
@@ -145,6 +197,46 @@ def _compromised_binary(v: Any) -> float:
     if not math.isfinite(x):
         return 0.0
     return 1.0 if x == 1.0 else 0.0
+
+
+def _parse_battery_level(v: Any) -> float:
+    if v is None:
+        return float("nan")
+    if isinstance(v, bool):
+        return float("nan")
+    if isinstance(v, (int, float)):
+        x = float(v)
+        return x if math.isfinite(x) else float("nan")
+    s = str(v).strip()
+    if not s:
+        return float("nan")
+    try:
+        x = float(s)
+        return x if math.isfinite(x) else float("nan")
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def _battery_very_low_flag(level: float) -> float:
+    if not math.isfinite(level):
+        return 0.0
+    if 0.0 <= level <= 1.0 and level < 0.2:
+        return 1.0
+    if 1.0 < level <= 100.0 and level < 20.0:
+        return 1.0
+    return 0.0
+
+
+def _developer_tools_flag(v: Any) -> float:
+    if _empty_str(v):
+        return 0.0
+    if isinstance(v, (int, float)):
+        x = float(v)
+        return 1.0 if x != 0.0 and math.isfinite(x) else 0.0
+    s = str(v).strip().lower()
+    if s in ("false", "no", "off", "0", ""):
+        return 0.0
+    return 1.0
 
 
 def compute_features(
@@ -225,6 +317,13 @@ def compute_features(
     last_tz = last_txn.tz if last_txn is not None else None
     last_mcc = last_txn.mcc if last_txn is not None else None
     last_dkey = (last_txn.os_type, last_txn.dev_ver) if last_txn is not None else (None, None)
+
+    amount_diff_prev = float("nan")
+    amount_ratio_prev = float("nan")
+    if last_amount is not None and math.isfinite(float(last_amount)) and math.isfinite(amount):
+        la = float(last_amount)
+        amount_diff_prev = amount - la
+        amount_ratio_prev = _safe_div(amount, la)
 
     mean_last_3 = float("nan")
     if n_amt >= 1:
@@ -364,6 +463,26 @@ def compute_features(
     else:
         std_time_deltas = float("nan")
 
+    amount_change_sign = float("nan")
+    if math.isfinite(amount_diff_prev):
+        if abs(amount_diff_prev) < EPS:
+            amount_change_sign = 0.0
+        elif amount_diff_prev > 0.0:
+            amount_change_sign = 1.0
+        else:
+            amount_change_sign = -1.0
+
+    amount_inc_streak = amount_dec_streak = 0
+    if len(amounts) >= 2:
+        j = len(amounts) - 1
+        while j >= 1 and amounts[j] > amounts[j - 1]:
+            amount_inc_streak += 1
+            j -= 1
+        j = len(amounts) - 1
+        while j >= 1 and amounts[j] < amounts[j - 1]:
+            amount_dec_streak += 1
+            j -= 1
+
     is_device_switch = 1.0 if (not _empty_str(os_c) or not _empty_str(dev_c)) and dkey_c != last_dkey else 0.0
     is_mcc_switch = 1.0 if not _empty_str(mcc_c) and not _empty_str(last_mcc) and mcc_c != last_mcc else 0.0
 
@@ -411,10 +530,12 @@ def compute_features(
         is_weekend = float("nan")
 
     tx_10m = float(count_since(timedelta(minutes=10)))
+    tx_5m = float(count_since(timedelta(minutes=5)))
     tx_1h = float(count_since(timedelta(hours=1)))
     tx_24h = float(count_since(timedelta(hours=24)))
     sum_1h = sum_since(timedelta(hours=1))
     sum_24h = sum_since(timedelta(hours=24))
+    sum_amount_last_10m = sum_since(timedelta(minutes=10))
 
     # Frequencies and pair novelty (depend on exact strings in window).
     descr_c = "" if _empty_str(descr) else str(descr).strip()
@@ -500,6 +621,7 @@ def compute_features(
                 len(recent_24h_amounts)
             )
 
+    mcc_amount_std_same_5d = float("nan")
     if thr_5d is None or not mcc_c_s or math.isnan(amount):
         amount_relative_to_mcc_median_5_days = float("nan")
     else:
@@ -517,6 +639,209 @@ def compute_features(
         else:
             mcc_med_5d = float(statistics.median(mcc_amounts_5d))
             amount_relative_to_mcc_median_5_days = amount / mcc_med_5d if mcc_med_5d != 0.0 else float("nan")
+            if len(mcc_amounts_5d) >= 2:
+                mcc_amount_std_same_5d = float(statistics.stdev(mcc_amounts_5d))
+
+    n_win = len(window)
+    amount_ratio_to_window_median = (
+        amount / median if (not math.isnan(median) and median != 0.0 and math.isfinite(amount)) else float("nan")
+    )
+    amount_iqr_normalized = float("nan")
+    if n_amt >= 2 and math.isfinite(amount):
+        s_iqr = sorted(amounts)
+        i25 = (n_amt - 1) // 4
+        i75 = 3 * (n_amt - 1) // 4
+        q25, q75 = s_iqr[i25], s_iqr[i75]
+        iqr = q75 - q25
+        denom = abs(iqr) if abs(iqr) > EPS else EPS
+        amount_iqr_normalized = (amount - q25) / denom
+    amount_cv_in_window = (
+        (std / mean) if (not math.isnan(mean) and abs(mean) > EPS and not math.isnan(std)) else float("nan")
+    )
+
+    umcc: set[str] = set()
+    udev: set[tuple[Any, Any]] = set()
+    uch: set[tuple[Any, Any]] = set()
+    utz: set[str] = set()
+    ubl: set[str] = set()
+    for t in window:
+        if not _empty_str(t.mcc):
+            umcc.add(str(t.mcc).strip())
+        if not _empty_str(t.os_type) or not _empty_str(t.dev_ver):
+            udev.add((t.os_type, t.dev_ver))
+        if not _empty_str(t.ch_type) or not _empty_str(t.ch_sub):
+            uch.add((t.ch_type, t.ch_sub))
+        if not _empty_str(t.tz):
+            utz.add(str(t.tz).strip())
+        if not _empty_str(t.browser_language):
+            ubl.add(str(t.browser_language).strip())
+
+    Lsw = min(20, n_win)
+    mcc_switch_cnt = dev_switch_cnt = ch_switch_cnt = 0
+    if Lsw >= 2:
+        tail = window[-Lsw:]
+        for i in range(Lsw - 1):
+            a, b = tail[i], tail[i + 1]
+            if ("" if _empty_str(a.mcc) else str(a.mcc).strip()) != ("" if _empty_str(b.mcc) else str(b.mcc).strip()):
+                mcc_switch_cnt += 1
+            if (a.os_type, a.dev_ver) != (b.os_type, b.dev_ver):
+                dev_switch_cnt += 1
+            if (a.ch_type, a.ch_sub) != (b.ch_type, b.ch_sub):
+                ch_switch_cnt += 1
+
+    night_share_24h = 0.0
+    distinct_hours_24h = 0.0
+    if thr_24h is not None:
+        hrs24: set[int] = set()
+        cnt24 = night24 = 0
+        for t in window:
+            if t.dttm is None or t.dttm < thr_24h:
+                continue
+            cnt24 += 1
+            h = t.dttm.hour
+            hrs24.add(h)
+            if h >= 22 or h < 6:
+                night24 += 1
+        if cnt24 > 0:
+            night_share_24h = float(night24) / float(cnt24)
+        distinct_hours_24h = float(len(hrs24)) / 24.0
+
+    amount_ratio_to_min_amount_24h = float("nan")
+    if thr_24h is not None and math.isfinite(amount):
+        mins: list[float] = []
+        for t in window:
+            if t.dttm is None or t.dttm < thr_24h:
+                continue
+            if t.amount is not None and math.isfinite(t.amount):
+                mins.append(t.amount)
+        if mins:
+            amin = min(mins)
+            if amin > EPS:
+                amount_ratio_to_min_amount_24h = amount / amin
+
+    compromised_hist = 0
+    secs_since_compromised = float("nan")
+    if dttm is not None:
+        compromised_hist = sum(1 for t in window if _compromised_binary(t.compromised) == 1.0)
+        for t in reversed(window):
+            if _compromised_binary(t.compromised) == 1.0 and t.dttm is not None:
+                secs_since_compromised = float((dttm - t.dttm).total_seconds())
+                break
+
+    web_rdp_cnt_24h = voip_cnt_24h = 0
+    if thr_24h is not None:
+        for t in window:
+            if t.dttm is None or t.dttm < thr_24h:
+                continue
+            if not _empty_str(t.web_rdp):
+                web_rdp_cnt_24h += 1
+            if not _empty_str(t.voip):
+                voip_cnt_24h += 1
+
+    channel_rel_freq = (
+        _safe_div(float(channel_count_i), float(n_win)) if n_win > 0 else float("nan")
+    )
+    tz_rel_freq = _safe_div(float(timezone_count_i), float(n_win)) if n_win > 0 else float("nan")
+    bl_rel_freq = _safe_div(float(bl_count_i), float(n_win)) if n_win > 0 else float("nan")
+
+    event_type_nm_share_suffix = 0.0
+    if n_win > 0 and math.isfinite(event_type_nm_cur):
+        event_type_nm_share_suffix = float(
+            sum(1 for t in window if _parse_event_type_nm(t.event_type_nm) == event_type_nm_cur)
+        ) / float(n_win)
+
+    mcc_streak = 0.0
+    if mcc_c_s:
+        st = 0
+        for t in reversed(window):
+            if ("" if _empty_str(t.mcc) else str(t.mcc).strip()) == mcc_c_s:
+                st += 1
+            else:
+                break
+        mcc_streak = float(st)
+
+    mean_gap_last_5 = float("nan")
+    if deltas:
+        n5 = min(5, len(deltas))
+        mean_gap_last_5 = float(sum(deltas[-n5:]) / n5)
+
+    dttms_sorted = [t.dttm for t in window if t.dttm is not None]
+    suffix_span_log1p = float("nan")
+    tx_per_span_hour = float("nan")
+    if dttms_sorted and n_win > 0:
+        span_sec = (max(dttms_sorted) - min(dttms_sorted)).total_seconds()
+        hours = span_sec / 3600.0
+        if hours < EPS:
+            hours = EPS
+        suffix_span_log1p = math.log1p(max(0.0, span_sec / 3600.0))
+        tx_per_span_hour = float(n_win) / hours
+
+    weekend_share_7d = 0.0
+    if dttm is not None:
+        thr7 = dttm - timedelta(days=7)
+        c7 = wk7 = 0
+        for t in window:
+            if t.dttm is None or t.dttm < thr7:
+                continue
+            c7 += 1
+            if t.dttm.weekday() >= 5:
+                wk7 += 1
+        if c7 > 0:
+            weekend_share_7d = float(wk7) / float(c7)
+
+    descr_div_24h = 0.0
+    if thr_24h is not None:
+        dset: set[str] = set()
+        cntd = 0
+        for t in window:
+            if t.dttm is None or t.dttm < thr_24h:
+                continue
+            cntd += 1
+            ed = "" if _empty_str(t.event_descr) else str(t.event_descr).strip()
+            if ed:
+                dset.add(ed)
+        descr_div_24h = float(len(dset)) / float(max(1, cntd))
+
+    is_new_timezone = 1.0 if (not _empty_str(tz_c) and timezone_count_i == 0) else 0.0
+    is_timezone_change = (
+        1.0
+        if (
+            not _empty_str(tz_c)
+            and last_tz is not None
+            and not _empty_str(last_tz)
+            and str(tz_c).strip() != str(last_tz).strip()
+        )
+        else 0.0
+    )
+
+    battery_level_v = _parse_battery_level(row.get("battery"))
+    battery_very_low_f = _battery_very_low_flag(battery_level_v)
+    developer_tools_f = _developer_tools_flag(row.get("developer_tools"))
+    acc_s = "" if _empty_str(row.get("accept_language")) else str(row.get("accept_language")).strip()
+    bl_cmp = "" if _empty_str(bl_c) else str(bl_c).strip()
+    accept_lang_browser_mismatch = 1.0 if (acc_s and bl_cmp and acc_s != bl_cmp) else 0.0
+    battery_very_low_and_night = (
+        1.0
+        if (battery_very_low_f == 1.0 and not math.isnan(is_night) and is_night == 1.0)
+        else 0.0
+    )
+
+    is_new_session_id = 1.0 if (sid_c is not None and not _empty_str(sid_c) and n_sess == 0) else 0.0
+    Lsess = min(20, n_win)
+    session_switch_cnt = 0
+    if Lsess >= 2:
+        tail_s = window[-Lsess:]
+        for i in range(Lsess - 1):
+            if tail_s[i].session_id != tail_s[i + 1].session_id:
+                session_switch_cnt += 1
+
+    sf_sess = session_first_dttm.get(sid_c) if sid_c is not None else None
+    seconds_since_session_start_in_window = float("nan")
+    if dttm is not None and sid_c is not None and not _empty_str(sid_c):
+        if sf_sess is not None:
+            seconds_since_session_start_in_window = float((dttm - sf_sess).total_seconds())
+        else:
+            seconds_since_session_start_in_window = 0.0
 
     cap = agg.window_transaction_cap
     if cap is None:
@@ -581,4 +906,56 @@ def compute_features(
         "mcc_event_descr_pair_new": mcc_event_descr_pair_new,
         "high_amount_ratio_last_24h": high_amount_ratio_last_24h,
         "amount_relative_to_mcc_median_5_days": amount_relative_to_mcc_median_5_days,
+        "amount_ratio_to_window_median": amount_ratio_to_window_median,
+        "amount_iqr_normalized": amount_iqr_normalized,
+        "amount_cv_in_window": amount_cv_in_window,
+        "sum_amount_last_10m": sum_amount_last_10m,
+        "transactions_last_1h": tx_1h,
+        "unique_mcc_count_suffix": float(len(umcc)),
+        "unique_device_key_count_suffix": float(len(udev)),
+        "unique_channel_key_count_suffix": float(len(uch)),
+        "unique_timezone_count_suffix": float(len(utz)),
+        "unique_browser_language_count_suffix": float(len(ubl)),
+        "mcc_switch_count_last_20_tx": float(mcc_switch_cnt),
+        "device_switch_count_last_20_tx": float(dev_switch_cnt),
+        "channel_switch_count_last_20_tx": float(ch_switch_cnt),
+        "night_transaction_share_last_24h": night_share_24h,
+        "distinct_hours_active_last_24h": distinct_hours_24h,
+        "mean_amount_last_3_transactions": mean_last_3,
+        "amount_ratio_to_min_amount_24h": amount_ratio_to_min_amount_24h,
+        "compromised_history_count_suffix": float(compromised_hist),
+        "seconds_since_last_compromised_tx": secs_since_compromised,
+        "web_rdp_count_last_24h": float(web_rdp_cnt_24h),
+        "voip_flag_count_last_24h": float(voip_cnt_24h),
+        "channel_relative_freq": channel_rel_freq,
+        "timezone_relative_freq": tz_rel_freq,
+        "browser_language_relative_freq": bl_rel_freq,
+        "event_type_nm_share_in_suffix": event_type_nm_share_suffix,
+        "mcc_consecutive_streak_length": mcc_streak,
+        "transactions_last_5m": tx_5m,
+        "mean_gap_seconds_last_5_intervals": mean_gap_last_5,
+        "suffix_time_span_hours_log1p": suffix_span_log1p,
+        "transactions_per_span_hour": tx_per_span_hour,
+        "mcc_amount_std_same_5d": mcc_amount_std_same_5d,
+        "weekend_transaction_share_last_7d": weekend_share_7d,
+        "distinct_event_descr_count_last_24h_norm": descr_div_24h,
+        "is_new_timezone": is_new_timezone,
+        "is_timezone_change": is_timezone_change,
+        "currency_iso_cd_cat": cat_to_float(row.get("currency_iso_cd")),
+        "pos_cd_cat": cat_to_float(row.get("pos_cd")),
+        "accept_language_cat": cat_to_float(row.get("accept_language")),
+        "battery_level": battery_level_v,
+        "battery_very_low_flag": battery_very_low_f,
+        "screen_size_cat": cat_to_float(row.get("screen_size")),
+        "developer_tools_flag": developer_tools_f,
+        "accept_lang_browser_lang_mismatch": accept_lang_browser_mismatch,
+        "battery_very_low_and_night": battery_very_low_and_night,
+        "amount_diff_prev": amount_diff_prev,
+        "amount_ratio_prev": amount_ratio_prev,
+        "amount_change_sign": amount_change_sign,
+        "amount_increase_streak_suffix": float(amount_inc_streak),
+        "amount_decrease_streak_suffix": float(amount_dec_streak),
+        "is_new_session_id": is_new_session_id,
+        "session_switch_count_last_20_tx": float(session_switch_cnt),
+        "seconds_since_session_start_in_window": seconds_since_session_start_in_window,
     }

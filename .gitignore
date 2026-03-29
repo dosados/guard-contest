@@ -19,6 +19,10 @@ training/cpp/build/
 
 saves
 
+output/xgb_extmem_train_single/
+output/xgb_extmem_val_single/
+
+
 # output/: игнорируем тяжёлые датасеты и модели; графики (.png), отчёты (.md, .txt) и CSV в research/ — в репозитории
 output/full_dataset.parquet
 output/model_xgb.json

@@ -19,7 +19,7 @@
 - Флаги/текст: `compromised`, `web_rdp_connection`, `phone_voip_call_state`, `event_type_nm`, `event_descr` (fallback `event_desc`).
 
 Семантика окна при сборке датасета (C++):
-- Deque не длиннее `kWindowCap` = 512; pretrain заполняет окно, по строкам train сначала считаются фичи, затем текущая строка пушится в окно.
+- Deque не длиннее `kWindowCap` = 512; для каждой пары `pretrain_part_k` → `train_part_k` pretrain заполняет окно когорты k, затем по строкам `train_part_k` сначала считаются фичи, затем текущая строка пушится в окно (после части k окна этой когорты выбрасываются из памяти; значения фич не меняются при непересечении customer_id между разными k).
 - Для каждой строки train задаётся `target_len` = `WindowTargetSampler.sample(event_id, customer_id)`: детерминированно по хешу от `(event_id, customer_id)` выбирается целое из гистограммы «число строк на клиента в pretest», ограниченное сверху 512. Если pretest нет — используется вырожденное распределение `{1}`.
 - `eff = min(размер_deque, target_len)`; почти все агрегаты по истории считаются только по суффиксу deque индексов `[sz - eff, sz)` (в коде переменная `start`).
 - Колонка `tr_amount` в parquet = `eff`; `log_1_plus_transactions_seen` = `log1p(eff)`.

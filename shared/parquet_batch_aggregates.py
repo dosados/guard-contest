@@ -44,6 +44,12 @@ FEATURE_COLUMNS = [
     "event_type_nm",
     "event_descr",
     "event_desc",
+    "currency_iso_cd",
+    "pos_cd",
+    "accept_language",
+    "battery",
+    "screen_size",
+    "developer_tools",
 ]
 
 

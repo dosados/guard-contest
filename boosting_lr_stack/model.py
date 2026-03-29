@@ -15,6 +15,9 @@ from shared.config import (
     MODEL_XGB_HIGH_TR_AMOUNT_PATH,
     MODEL_XGB_LOW_TR_AMOUNT_PATH,
     MODEL_XGB_PATH,
+    validate_catboost_classifier_features,
+    validate_model_input_dataframe,
+    validate_xgboost_booster_feature_count,
 )
 
 TR_AMOUNT_SPLIT_THRESHOLD = 30.0
@@ -50,6 +53,7 @@ def load_base_boosters(*, use_segmented_xgb: bool) -> dict[str, Any]:
         raise FileNotFoundError(f"Не найдена CatBoost модель: {MODEL_PATH}")
     cat_model = CatBoostClassifier()
     cat_model.load_model(str(MODEL_PATH))
+    validate_catboost_classifier_features(cat_model)
 
     if use_segmented_xgb:
         if not (MODEL_XGB_LOW_TR_AMOUNT_PATH.exists() and MODEL_XGB_HIGH_TR_AMOUNT_PATH.exists()):
@@ -59,8 +63,10 @@ def load_base_boosters(*, use_segmented_xgb: bool) -> dict[str, Any]:
             )
         m_low = XGBClassifier()
         m_low.load_model(str(MODEL_XGB_LOW_TR_AMOUNT_PATH))
+        validate_xgboost_booster_feature_count(m_low.get_booster())
         m_high = XGBClassifier()
         m_high.load_model(str(MODEL_XGB_HIGH_TR_AMOUNT_PATH))
+        validate_xgboost_booster_feature_count(m_high.get_booster())
         return {
             "catboost": cat_model,
             "use_segmented_xgb": True,
@@ -72,6 +78,7 @@ def load_base_boosters(*, use_segmented_xgb: bool) -> dict[str, Any]:
         raise FileNotFoundError(f"Не найдена XGBoost модель: {MODEL_XGB_PATH}")
     m = XGBClassifier()
     m.load_model(str(MODEL_XGB_PATH))
+    validate_xgboost_booster_feature_count(m.get_booster())
     return {
         "catboost": cat_model,
         "use_segmented_xgb": False,
@@ -80,6 +87,7 @@ def load_base_boosters(*, use_segmented_xgb: bool) -> dict[str, Any]:
 
 
 def build_meta_features(X: pd.DataFrame, boosters: dict[str, Any]) -> np.ndarray:
+    validate_model_input_dataframe(X)
     cat_model: CatBoostClassifier = boosters["catboost"]
     cat_pr = np.asarray(cat_model.predict_proba(X[MODEL_INPUT_FEATURES])[:, 1], dtype=np.float64)
 

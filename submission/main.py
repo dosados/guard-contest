@@ -33,6 +33,9 @@ from shared.config import (
     OUTPUT_DIR,
     PRETEST_PATH,
     TEST_PATH,
+    validate_catboost_classifier_features,
+    validate_model_input_dataframe,
+    validate_xgboost_booster_feature_count,
 )
 from shared.features import compute_features
 from shared.parquet_batch_aggregates import (
@@ -83,8 +86,10 @@ def load_predictor(model_name: str, *, use_segmented_xgb: bool = False):
 
         m = CatBoostClassifier()
         m.load_model(str(MODEL_PATH))
+        validate_catboost_classifier_features(m)
 
         def pred(X: pd.DataFrame) -> np.ndarray:
+            validate_model_input_dataframe(X)
             pr = m.predict_proba(X)[:, 1]
             return proba_to_logit(pr)
 
@@ -103,10 +108,12 @@ def load_predictor(model_name: str, *, use_segmented_xgb: bool = False):
             m_low = XGBClassifier()
             m_low.load_model(str(MODEL_XGB_LOW_TR_AMOUNT_PATH))
             booster_low = m_low.get_booster()
+            validate_xgboost_booster_feature_count(booster_low)
 
             m_high = XGBClassifier()
             m_high.load_model(str(MODEL_XGB_HIGH_TR_AMOUNT_PATH))
             booster_high = m_high.get_booster()
+            validate_xgboost_booster_feature_count(booster_high)
             logger.info(
                 "XGBoost: используем 2 модели по tr_amount (<=%.0f: %s, >%.0f: %s)",
                 TR_AMOUNT_SPLIT_THRESHOLD,
@@ -120,9 +127,11 @@ def load_predictor(model_name: str, *, use_segmented_xgb: bool = False):
             m = XGBClassifier()
             m.load_model(str(MODEL_XGB_PATH))
             booster = m.get_booster()
+            validate_xgboost_booster_feature_count(booster)
             logger.info("XGBoost: используем legacy одиночную модель %s", MODEL_XGB_PATH.name)
 
         def pred(X: pd.DataFrame) -> np.ndarray:
+            validate_model_input_dataframe(X)
             if use_segmented_models:
                 if "tr_amount" not in X.columns:
                     raise ValueError("Для двухмодельного XGBoost в инференсе требуется колонка tr_amount.")
@@ -321,6 +330,7 @@ def main() -> None:
 
     logger.info("Предсказание: матрица %d × %d", len(feature_matrix), len(MODEL_INPUT_FEATURES))
     X = pd.DataFrame(feature_matrix)[MODEL_INPUT_FEATURES]
+    validate_model_input_dataframe(X)
     if use_torch_mlp:
         import torch
         from torch_logic.predict_mlp import predict_mlp_dataframe
