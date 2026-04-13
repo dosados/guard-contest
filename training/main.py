@@ -30,8 +30,6 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from shared.config import (
     MODEL_XGB_PATH,
-    MODEL_XGB_HIGH_TR_AMOUNT_PATH,
-    MODEL_XGB_LOW_TR_AMOUNT_PATH,
     OUTPUT_DIR,
     TRAIN_DATASET_PATH,
     remap_sample_weight_from_dataset,
@@ -47,24 +45,49 @@ from training.config import (
 )
 
 logger = logging.getLogger(__name__)
-TR_AMOUNT_SPLIT_THRESHOLD = 30.0
+
+# full_dataset.parquet (C++ build_dataset): event_dttm как utf8, например "2024-10-01 05:29:14"
+_EVENT_DTTM_STRING_FORMAT = "%Y-%m-%d %H:%M:%S"
+_EVENT_DTTM_TS_TYPE = pa.timestamp("s")
 
 
-def _prepare_batch(
-    dfb: pd.DataFrame,
-    feature_cols: list[str],
+def _pd_timestamp_cutoff_to_arrow_scalar_ts_s(cutoff_day: pd.Timestamp) -> pa.Scalar:
+    ts = cutoff_day
+    if ts.tzinfo is not None:
+        ts = ts.tz_convert("UTC").tz_localize(None)
+    return pa.scalar(ts.to_pydatetime(), type=_EVENT_DTTM_TS_TYPE)
+
+
+def _event_dttm_array_to_timestamp_seconds(arr: pa.Array) -> pa.Array:
+    """event_dttm из parquet → timestamp[s] для сравнений в pc.*; невалидное → null."""
+    if len(arr) == 0:
+        return pa.array([], type=_EVENT_DTTM_TS_TYPE)
+    if pa.types.is_dictionary(arr.type):
+        arr = pc.dictionary_decode(arr)
+    t = arr.type
+    if pa.types.is_timestamp(t):
+        return pc.cast(arr, _EVENT_DTTM_TS_TYPE)
+    if pa.types.is_string(t) or pa.types.is_large_string(t):
+        return pc.strptime(arr, format=_EVENT_DTTM_STRING_FORMAT, unit="s")
+    logger.warning("event_dttm: неожиданный тип %s, парсинг через pandas", t)
+    p = pd.to_datetime(arr.to_pandas(), errors="coerce")
+    return pc.cast(pa.array(p, from_pandas=True), _EVENT_DTTM_TS_TYPE)
+
+
+def _train_val_mask_from_event_dttm(
+    dttm_arr: pa.Array,
+    cutoff_ts_scalar: pa.Scalar,
     *,
-    remap_weight2_positive_label_to_zero: bool = False,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    x = dfb[feature_cols].apply(pd.to_numeric, errors="coerce").astype(np.float32).to_numpy(copy=False)
-    y = pd.to_numeric(dfb["target"], errors="coerce").fillna(0).astype(np.int32).to_numpy(copy=False)
-    w_raw = pd.to_numeric(dfb["sample_weight"], errors="coerce").fillna(1.0).astype(np.float32).to_numpy(copy=False)
-    if remap_weight2_positive_label_to_zero:
-        y = y.copy()
-        soft = (y == 1) & np.isclose(w_raw, np.float32(2.0), rtol=0.0, atol=1e-5)
-        y[soft] = 0
-    w = remap_sample_weight_from_dataset(w_raw)
-    return x, y, w
+    train_mode: bool,
+) -> np.ndarray:
+    """
+    Маска строк: train — event_dttm < cutoff; val — иначе (как pandas, в т.ч. NaT/невалид → в val).
+    """
+    ts = _event_dttm_array_to_timestamp_seconds(dttm_arr)
+    lt = pc.less(ts, cutoff_ts_scalar)
+    lt_pd = pc.fill_null(lt, False)
+    before = np.asarray(lt_pd, dtype=np.bool_)
+    return before if train_mode else ~before
 
 
 def _arrow_array_to_float64(arr: pa.Array) -> np.ndarray:
@@ -79,6 +102,12 @@ def _arrow_array_to_float64(arr: pa.Array) -> np.ndarray:
     if pa.types.is_floating(t) or pa.types.is_integer(t) or pa.types.is_boolean(t):
         v = pc.cast(arr, pa.float64())
         return np.asarray(v.to_numpy(zero_copy_only=False), dtype=np.float64)
+    if pa.types.is_string(t) or pa.types.is_large_string(t):
+        try:
+            v = pc.cast(arr, pa.float64())
+            return np.asarray(v.to_numpy(zero_copy_only=False), dtype=np.float64)
+        except pa.ArrowInvalid:
+            pass
     s = pd.to_numeric(pd.Series(arr.to_pandas(), dtype=object), errors="coerce")
     return s.to_numpy(dtype=np.float64, na_value=np.nan)
 
@@ -109,11 +138,13 @@ def _prepare_batch_from_recordbatch(
     *,
     remap_weight2_positive_label_to_zero: bool,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    cols = [_arrow_array_to_float64(rb.column(j)) for j in range(nfeat)]
-    x = np.column_stack(cols)[mask].astype(np.float32, copy=False)
-    y_f = _arrow_array_to_float64(rb.column(j_target))
-    w_f = _arrow_array_to_float64(rb.column(j_sw))
-    y, w = _finalize_yw(y_f[mask], w_f[mask], remap_weight2_positive_label_to_zero=remap_weight2_positive_label_to_zero)
+    idx = np.flatnonzero(mask)
+    rb_sub = rb.take(pa.array(idx, type=pa.int32()))
+    cols = [_arrow_array_to_float64(rb_sub.column(j)) for j in range(nfeat)]
+    x = np.column_stack(cols).astype(np.float32, copy=False)
+    y_f = _arrow_array_to_float64(rb_sub.column(j_target))
+    w_f = _arrow_array_to_float64(rb_sub.column(j_sw))
+    y, w = _finalize_yw(y_f, w_f, remap_weight2_positive_label_to_zero=remap_weight2_positive_label_to_zero)
     return x, y, w
 
 
@@ -125,8 +156,6 @@ def _detect_columns(path: Path) -> tuple[list[str], str]:
         raise ValueError("В датасете нет колонки event_dttm")
     if "target" not in names or "sample_weight" not in names:
         raise ValueError("В датасете нет target/sample_weight")
-    if "tr_amount" not in feature_cols:
-        raise ValueError("В датасете/фичах нет tr_amount, невозможно обучить двухсегментные модели.")
     return feature_cols, "event_dttm"
 
 
@@ -136,11 +165,17 @@ def _find_time_cutoff(path: Path, val_ratio: float, batch_size: int = 2_500_000)
     by_day: Counter[pd.Timestamp] = Counter()
     total = 0
     for rb in pf.iter_batches(columns=["event_dttm"], batch_size=batch_size):
-        s = pd.to_datetime(rb.column(0).to_pandas(), errors="coerce").dt.floor("D")
-        vc = s.value_counts(dropna=True)
-        for k, v in vc.items():
-            by_day[k] += int(v)
-            total += int(v)
+        ts = _event_dttm_array_to_timestamp_seconds(rb.column(0))
+        floored = pc.floor_temporal(ts, unit="day")
+        vc_struct = pc.value_counts(floored)
+        vals = vc_struct.field(0)
+        cnts = vc_struct.field(1)
+        for v, c in zip(vals.to_pylist(), cnts.to_pylist()):
+            if v is None:
+                continue
+            day = pd.Timestamp(v).normalize()
+            by_day[day] += int(c)
+            total += int(c)
     if total == 0:
         raise ValueError("Не удалось прочитать event_dttm для split по времени.")
     val_target = max(1, int(total * val_ratio))
@@ -160,24 +195,15 @@ def _count_val_rows(
     path: Path,
     dttm_col: str,
     cutoff_day: pd.Timestamp,
-    tr_amount_col: str,
-    tr_amount_lower_exclusive: float | None = None,
-    tr_amount_upper_inclusive: float | None = None,
     batch_size: int = 2_500_000,
 ) -> int:
-    """Число val-строк (dttm >= cutoff по маске ~train); без полного DataFrame на батч."""
+    """Число val-строк (dttm >= cutoff); без полного DataFrame на батч."""
     pf = pq.ParquetFile(path)
     n_val = 0
-    for rb in pf.iter_batches(columns=[dttm_col, tr_amount_col], batch_size=batch_size):
-        s = pd.to_datetime(rb.column(0).to_pandas(), errors="coerce")
-        before = (s < cutoff_day).to_numpy(dtype=np.bool_, copy=False)
-        mask = ~before
-        tr_values = pd.to_numeric(rb.column(1).to_pandas(), errors="coerce").to_numpy(dtype=np.float64, copy=False)
-        if tr_amount_lower_exclusive is not None:
-            mask &= tr_values > float(tr_amount_lower_exclusive)
-        if tr_amount_upper_inclusive is not None:
-            mask &= tr_values <= float(tr_amount_upper_inclusive)
-        n_val += int(mask.sum())
+    cutoff_scalar = _pd_timestamp_cutoff_to_arrow_scalar_ts_s(cutoff_day)
+    for rb in pf.iter_batches(columns=[dttm_col], batch_size=batch_size):
+        m = _train_val_mask_from_event_dttm(rb.column(0), cutoff_scalar, train_mode=False)
+        n_val += int(m.sum())
     return n_val
 
 
@@ -250,36 +276,26 @@ class ParquetTrainValDataIter(DataIter):
         parquet_path: Path,
         feature_cols: list[str],
         dttm_col: str,
-        tr_amount_col: str,
         cutoff_day: pd.Timestamp,
         batch_rows: int,
         mode: Literal["train", "val"],
         *,
         cache_prefix: str | None,
-        tr_amount_lower_exclusive: float | None = None,
-        tr_amount_upper_inclusive: float | None = None,
         remap_weight2_positive_label_to_zero: bool = False,
     ) -> None:
         self._parquet_path = parquet_path
         self._feature_cols = feature_cols
         self._dttm_col = dttm_col
-        self._tr_amount_col = tr_amount_col
-        self._cutoff_day = cutoff_day
         self._batch_rows = batch_rows
         self._mode = mode
-        self._tr_amount_lower_exclusive = tr_amount_lower_exclusive
-        self._tr_amount_upper_inclusive = tr_amount_upper_inclusive
         self._remap_weight2_positive_label_to_zero = remap_weight2_positive_label_to_zero
         self._cols = feature_cols + ["target", "sample_weight", dttm_col]
         self._nfeat = len(feature_cols)
-        try:
-            self._j_tr = feature_cols.index(tr_amount_col)
-        except ValueError as e:
-            raise ValueError("tr_amount_col должен входить в feature_cols") from e
         self._j_target = self._nfeat
         self._j_sw = self._nfeat + 1
         self._j_dttm = self._nfeat + 2
         self._batch_iter = None
+        self._cutoff_ts_scalar = _pd_timestamp_cutoff_to_arrow_scalar_ts_s(cutoff_day)
         if cache_prefix is not None:
             super().__init__(cache_prefix=cache_prefix, release_data=True)
         else:
@@ -298,14 +314,11 @@ class ParquetTrainValDataIter(DataIter):
                 return False
             if rb.num_rows == 0:
                 continue
-            dttm_series = pd.to_datetime(rb.column(self._j_dttm).to_pandas(), errors="coerce")
-            before_cutoff = (dttm_series < self._cutoff_day).to_numpy(dtype=np.bool_, copy=False)
-            mask = before_cutoff if train_mode else ~before_cutoff
-            tr = _arrow_array_to_float64(rb.column(self._j_tr))
-            if self._tr_amount_lower_exclusive is not None:
-                mask = mask & (tr > float(self._tr_amount_lower_exclusive))
-            if self._tr_amount_upper_inclusive is not None:
-                mask = mask & (tr <= float(self._tr_amount_upper_inclusive))
+            mask = _train_val_mask_from_event_dttm(
+                rb.column(self._j_dttm),
+                self._cutoff_ts_scalar,
+                train_mode=train_mode,
+            )
             if not mask.any():
                 continue
             x, y, w = _prepare_batch_from_recordbatch(
@@ -329,15 +342,11 @@ def train_xgb_streaming_prauc(
     parquet_path: Path,
     feature_cols: list[str],
     dttm_col: str,
-    tr_amount_col: str,
     cutoff_day: pd.Timestamp,
     params: dict[str, float | int | str],
     *,
     ext_train_cache: Path,
     ext_val_cache: Path,
-    tr_amount_lower_exclusive: float | None = None,
-    tr_amount_upper_inclusive: float | None = None,
-    segment_name: str = "all",
     num_boost_round: int | None = None,
     batch_rows: int | None = None,
     early_stopping_rounds: int | None = None,
@@ -383,13 +392,10 @@ def train_xgb_streaming_prauc(
         parquet_path,
         feature_cols,
         dttm_col,
-        tr_amount_col,
         cutoff_day,
         br,
         "train",
         cache_prefix=train_cp,
-        tr_amount_lower_exclusive=tr_amount_lower_exclusive,
-        tr_amount_upper_inclusive=tr_amount_upper_inclusive,
         remap_weight2_positive_label_to_zero=remap_weight2_positive_label_to_zero,
     )
     if use_extmem:
@@ -402,17 +408,9 @@ def train_xgb_streaming_prauc(
     yva = None
     val_it = None
 
-    logger.info("Подсчёт val-строк по event_dttm + tr_amount (сегмент: %s) …", segment_name)
-    n_val = _count_val_rows(
-        parquet_path,
-        dttm_col,
-        cutoff_day,
-        tr_amount_col=tr_amount_col,
-        tr_amount_lower_exclusive=tr_amount_lower_exclusive,
-        tr_amount_upper_inclusive=tr_amount_upper_inclusive,
-        batch_size=br,
-    )
-    logger.info("Val rows (оценка по time split, сегмент %s): %d", segment_name, n_val)
+    logger.info("Подсчёт val-строк по event_dttm …")
+    n_val = _count_val_rows(parquet_path, dttm_col, cutoff_day, batch_size=br)
+    logger.info("Val rows (оценка по time split): %d", n_val)
 
     if n_val > 0:
         if use_extmem:
@@ -423,13 +421,10 @@ def train_xgb_streaming_prauc(
             parquet_path,
             feature_cols,
             dttm_col,
-            tr_amount_col,
             cutoff_day,
             br,
             "val",
             cache_prefix=val_cp,
-            tr_amount_lower_exclusive=tr_amount_lower_exclusive,
-            tr_amount_upper_inclusive=tr_amount_upper_inclusive,
             remap_weight2_positive_label_to_zero=remap_weight2_positive_label_to_zero,
         )
         if use_extmem:
@@ -488,85 +483,6 @@ def train_xgb_streaming_prauc(
     return pr, booster, cleanup
 
 
-def evaluate_segmented_val_prauc(
-    parquet_path: Path,
-    feature_cols: list[str],
-    dttm_col: str,
-    cutoff_day: pd.Timestamp,
-    low_booster: Any,
-    high_booster: Any,
-    *,
-    tr_amount_col: str = "tr_amount",
-    threshold: float = TR_AMOUNT_SPLIT_THRESHOLD,
-    batch_size: int = 1_000_000,
-    remap_weight2_positive_label_to_zero: bool = False,
-) -> float:
-    """Единый PR-AUC на всей val: запись роутится в low/high модель по tr_amount, как в submission."""
-    import xgboost as xgb
-
-    pf = pq.ParquetFile(parquet_path)
-    columns = feature_cols + ["target", "sample_weight", dttm_col, tr_amount_col]
-
-    y_all: list[np.ndarray] = []
-    p_all: list[np.ndarray] = []
-    w_all: list[np.ndarray] = []
-    total_rows = 0
-
-    for rb in pf.iter_batches(columns=columns, batch_size=batch_size):
-        dfb = rb.to_pandas()
-        dttm = pd.to_datetime(dfb[dttm_col], errors="coerce")
-        val_mask = ~(dttm < cutoff_day)
-        if not bool(val_mask.any()):
-            continue
-        val_df = dfb.loc[val_mask].copy()
-        if val_df.empty:
-            continue
-
-        tr_values = pd.to_numeric(val_df[tr_amount_col], errors="coerce")
-        low_mask = tr_values <= float(threshold)
-        high_mask = ~low_mask
-
-        y = pd.to_numeric(val_df["target"], errors="coerce").fillna(0).astype(np.int32).to_numpy(copy=False)
-        w_raw = pd.to_numeric(val_df["sample_weight"], errors="coerce").fillna(1.0).astype(np.float32).to_numpy(
-            copy=False
-        )
-        if remap_weight2_positive_label_to_zero:
-            y = y.copy()
-            soft = (y == 1) & np.isclose(w_raw, np.float32(2.0), rtol=0.0, atol=1e-5)
-            y[soft] = 0
-        w = remap_sample_weight_from_dataset(w_raw).astype(np.float64, copy=False)
-        p = np.zeros(len(val_df), dtype=np.float32)
-
-        if bool(low_mask.any()):
-            x_low = (
-                val_df.loc[low_mask, feature_cols].apply(pd.to_numeric, errors="coerce").astype(np.float32).to_numpy(copy=False)
-            )
-            d_low = xgb.DMatrix(x_low, feature_names=feature_cols)
-            p[low_mask.to_numpy()] = _xgb_predict_with_best_iteration(low_booster, d_low)
-        if bool(high_mask.any()):
-            x_high = (
-                val_df.loc[high_mask, feature_cols].apply(pd.to_numeric, errors="coerce").astype(np.float32).to_numpy(copy=False)
-            )
-            d_high = xgb.DMatrix(x_high, feature_names=feature_cols)
-            p[high_mask.to_numpy()] = _xgb_predict_with_best_iteration(high_booster, d_high)
-
-        y_all.append(y)
-        p_all.append(p.astype(np.float64, copy=False))
-        w_all.append(w)
-        total_rows += len(val_df)
-
-    if total_rows == 0:
-        logger.warning("Segmented PR-AUC: валидационные строки не найдены.")
-        return 0.0
-
-    y_concat = np.concatenate(y_all, axis=0)
-    p_concat = np.concatenate(p_all, axis=0)
-    w_concat = np.concatenate(w_all, axis=0)
-    pr = float(average_precision_score(y_concat, p_concat, sample_weight=w_concat))
-    logger.info("PR-AUC (val, routed как в submission): %.6f на %d строках", pr, total_rows)
-    return pr
-
-
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -580,15 +496,6 @@ def main() -> None:
         default="best",
         help="best (по умолчанию): гиперпараметры из training/grid_search/xgb_best_params.json; "
         "default: базовые XGB_PARAMS из training/config.py",
-    )
-    parser.add_argument(
-        "--xgb-segmented",
-        action="store_true",
-        help=(
-            "Включить двухмодельный режим XGBoost по tr_amount "
-            f"(<= {int(TR_AMOUNT_SPLIT_THRESHOLD)} и > {int(TR_AMOUNT_SPLIT_THRESHOLD)}). "
-            "По умолчанию обучается одна модель в legacy-путь."
-        ),
     )
     parser.add_argument(
         "--xgb-remap-weight2-positives-as-zero",
@@ -612,8 +519,6 @@ def main() -> None:
 
     results: list[tuple[str, float]] = []
 
-    logger.warning("CatBoost в этом скрипте не обучается — отдельный пайплайн.")
-
     try:
         params = _build_xgb_train_params(args.xgb_config)
         rounds = max(1, int(XGB_PARAMS.get("n_estimators", 600)))
@@ -624,103 +529,27 @@ def main() -> None:
             )
         logger.info("XGBoost train params: %s, num_boost_round=%d", params, rounds)
 
-        if args.xgb_segmented:
-            segments = [
-                {
-                    "name": f"tr_amount<={int(TR_AMOUNT_SPLIT_THRESHOLD)}",
-                    "tr_amount_lower_exclusive": None,
-                    "tr_amount_upper_inclusive": TR_AMOUNT_SPLIT_THRESHOLD,
-                    "model_path": MODEL_XGB_LOW_TR_AMOUNT_PATH,
-                    "ext_train_cache": OUTPUT_DIR / "xgb_extmem_train_tr_amount_le_30",
-                    "ext_val_cache": OUTPUT_DIR / "xgb_extmem_val_tr_amount_le_30",
-                },
-                {
-                    "name": f"tr_amount>{int(TR_AMOUNT_SPLIT_THRESHOLD)}",
-                    "tr_amount_lower_exclusive": TR_AMOUNT_SPLIT_THRESHOLD,
-                    "tr_amount_upper_inclusive": None,
-                    "model_path": MODEL_XGB_HIGH_TR_AMOUNT_PATH,
-                    "ext_train_cache": OUTPUT_DIR / "xgb_extmem_train_tr_amount_gt_30",
-                    "ext_val_cache": OUTPUT_DIR / "xgb_extmem_val_tr_amount_gt_30",
-                },
-            ]
-
-            trained: dict[str, Any] = {}
-            cleanups: list[Callable[[], None]] = []
-            for seg in segments:
-                logger.info("=== Обучение XGBoost сегмента: %s ===", seg["name"])
-                pr, booster, cleanup = train_xgb_streaming_prauc(
-                    TRAIN_DATASET_PATH,
-                    feature_cols,
-                    dttm_col,
-                    "tr_amount",
-                    cutoff_day,
-                    params,
-                    ext_train_cache=seg["ext_train_cache"],
-                    ext_val_cache=seg["ext_val_cache"],
-                    tr_amount_lower_exclusive=seg["tr_amount_lower_exclusive"],
-                    tr_amount_upper_inclusive=seg["tr_amount_upper_inclusive"],
-                    segment_name=seg["name"],
-                    num_boost_round=rounds,
-                    remap_weight2_positive_label_to_zero=args.xgb_remap_weight2_positives_as_zero,
-                )
-                results.append((f"XGBoost ({seg['name']})", pr))
-                booster.save_model(str(seg["model_path"]))
-                logger.info("XGBoost PR-AUC (val, %s): %.6f → %s", seg["name"], pr, seg["model_path"])
-                trained[seg["name"]] = booster
-                cleanups.append(cleanup)
-
-            low_name = f"tr_amount<={int(TR_AMOUNT_SPLIT_THRESHOLD)}"
-            high_name = f"tr_amount>{int(TR_AMOUNT_SPLIT_THRESHOLD)}"
-            if low_name in trained and high_name in trained:
-                pr_routed = evaluate_segmented_val_prauc(
-                    TRAIN_DATASET_PATH,
-                    feature_cols,
-                    dttm_col,
-                    cutoff_day,
-                    trained[low_name],
-                    trained[high_name],
-                    tr_amount_col="tr_amount",
-                    threshold=TR_AMOUNT_SPLIT_THRESHOLD,
-                    batch_size=XGB_EXTERNAL_PARQUET_BATCH_ROWS,
-                    remap_weight2_positive_label_to_zero=args.xgb_remap_weight2_positives_as_zero,
-                )
-                results.append(("XGBoost (val routed all rows)", pr_routed))
-
-            for cleanup in cleanups:
-                cleanup()
-
-            logger.info(
-                "Одиночный путь модели не перезаписывается: %s (двухсегментные веса сохранены отдельно).",
-                MODEL_XGB_PATH,
-            )
-        else:
-            logger.info("=== Обучение XGBoost (одна модель, legacy default) ===")
-            pr, booster, cleanup = train_xgb_streaming_prauc(
-                TRAIN_DATASET_PATH,
-                feature_cols,
-                dttm_col,
-                "tr_amount",
-                cutoff_day,
-                params,
-                ext_train_cache=OUTPUT_DIR / "xgb_extmem_train_single",
-                ext_val_cache=OUTPUT_DIR / "xgb_extmem_val_single",
-                segment_name="all",
-                num_boost_round=rounds,
-                remap_weight2_positive_label_to_zero=args.xgb_remap_weight2_positives_as_zero,
-            )
-            results.append(("XGBoost (single model)", pr))
-            booster.save_model(str(MODEL_XGB_PATH))
-            logger.info("XGBoost PR-AUC (val, single): %.6f → %s", pr, MODEL_XGB_PATH)
-            cleanup()
+        logger.info("=== Обучение XGBoost ===")
+        pr, booster, cleanup = train_xgb_streaming_prauc(
+            TRAIN_DATASET_PATH,
+            feature_cols,
+            dttm_col,
+            cutoff_day,
+            params,
+            ext_train_cache=OUTPUT_DIR / "xgb_extmem_train_single",
+            ext_val_cache=OUTPUT_DIR / "xgb_extmem_val_single",
+            num_boost_round=rounds,
+            remap_weight2_positive_label_to_zero=args.xgb_remap_weight2_positives_as_zero,
+        )
+        results.append(("XGBoost", pr))
+        booster.save_model(str(MODEL_XGB_PATH))
+        logger.info("XGBoost PR-AUC (val): %.6f → %s", pr, MODEL_XGB_PATH)
+        cleanup()
 
     except Exception as e:
         logger.warning("XGBoost пропущен: %s", e)
         _rm_tree(OUTPUT_DIR / "xgb_extmem_train_single")
         _rm_tree(OUTPUT_DIR / "xgb_extmem_val_single")
-        _rm_tree(OUTPUT_DIR / "xgb_extmem_train_tr_amount_le_30")
-        _rm_tree(OUTPUT_DIR / "xgb_extmem_val_tr_amount_le_30")
-        _rm_tree(OUTPUT_DIR / "xgb_extmem_train_tr_amount_gt_30")
-        _rm_tree(OUTPUT_DIR / "xgb_extmem_val_tr_amount_gt_30")
 
     logger.info("=== Сводка PR-AUC (валидация по времени) ===")
     for name, pr in sorted(results, key=lambda x: -x[1]):

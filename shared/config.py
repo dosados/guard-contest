@@ -35,9 +35,27 @@ PRETEST_PATH = TEST_DATA_ROOT / "pretest.parquet"
 TEST_PATH = TEST_DATA_ROOT / "test.parquet"
 
 OUTPUT_DIR = PROJECT_ROOT / "output"
+GLOBAL_CATEGORY_AGGREGATES_DIR = OUTPUT_DIR / "global_aggregates"
 TRAIN_DATASET_PATH = OUTPUT_DIR / "full_dataset.parquet"
 # Колонки в full_dataset.parquet от C++ build_dataset, не признаки модели (см. MODEL_INPUT_FEATURES).
-TRAIN_DATASET_META_COLUMNS: tuple[str, ...] = ("customer_id",)
+# mcc_code — int64 (числовой MCC), event_type_nm — float64 (код типа), остальные — utf8.
+TRAIN_DATASET_META_COLUMNS: tuple[str, ...] = (
+    "mcc_code",
+    "event_type_nm",
+    "event_descr",
+    "currency_iso_cd",
+    "pos_cd",
+    "accept_language",
+    "screen_size",
+    "timezone",
+    "channel_indicator_type",
+    "channel_indicator_subtype",
+    "customer_id",
+    "event_id",
+    "target",
+    "sample_weight",
+    "event_dttm",
+)
 
 # Побатчевое чтение parquet
 BATCH_SIZE = 65_536
@@ -65,18 +83,9 @@ def remap_sample_weight_from_dataset(weights: np.ndarray) -> np.ndarray:
     return out
 
 
-# Обучение
-MODEL_PATH = OUTPUT_DIR / "model.cbm"
+# Обучение (XGBoost)
 MODEL_XGB_PATH = OUTPUT_DIR / "model_xgb.json"
-MODEL_XGB_LOW_TR_AMOUNT_PATH = OUTPUT_DIR / "model_xgb_tr_amount_le_30.json"
-MODEL_XGB_HIGH_TR_AMOUNT_PATH = OUTPUT_DIR / "model_xgb_tr_amount_gt_30.json"
-MODEL_LGB_PATH = OUTPUT_DIR / "model_lgb.txt"
 MODEL_RF_PATH = OUTPUT_DIR / "model_rf.joblib"
-MODEL_LR_PATH = OUTPUT_DIR / "model_lr.joblib"
-MODEL_LR_BOOST_STACK_PATH = OUTPUT_DIR / "model_lr_boost_stack.joblib"
-MODEL_TORCH_PATH = OUTPUT_DIR / "weights" / "model_torch.pt"
-# Табличный MLP по full_dataset (все MODEL_INPUT_FEATURES → logit); чекпоинт с impute-средними по train.
-MODEL_TORCH_MLP_PATH = OUTPUT_DIR / "weights" / "model_torch_mlp.pt"
 
 # Все фичи датасета в порядке FEATURE_NAMES (обучение и submission).
 MODEL_INPUT_FEATURES: list[str] = list(FEATURE_NAMES)
@@ -85,7 +94,7 @@ MODEL_INPUT_FEATURES: list[str] = list(FEATURE_NAMES)
 def validate_model_input_dataframe(X: pd.DataFrame) -> None:
     """
     Инференс: порядок и имена колонок должны совпадать с обучением
-    (как dfb[feature_cols] в training/main.py и заголовок TSV в CatBoost).
+    (как dfb[feature_cols] в training/main.py).
     """
     expected = MODEL_INPUT_FEATURES
     n_exp = len(expected)
@@ -117,17 +126,6 @@ def validate_xgboost_booster_feature_count(booster: Any) -> None:
         raise ValueError(
             f"XGBoost: booster.num_features()={nf}, в коде len(MODEL_INPUT_FEATURES)={expected_n}. "
             "Переобучите модели на актуальном full_dataset.parquet."
-        )
-
-
-def validate_catboost_classifier_features(model: Any) -> None:
-    """Если CatBoost сохранил имена признаков — сверяем длину с MODEL_INPUT_FEATURES."""
-    expected_n = len(MODEL_INPUT_FEATURES)
-    fn = getattr(model, "feature_names_", None)
-    if fn is not None and len(fn) != expected_n:
-        raise ValueError(
-            f"CatBoost: в модели {len(fn)} признаков, в коде MODEL_INPUT_FEATURES={expected_n}. "
-            "Переобучите CatBoost на актуальном датасете."
         )
 
 

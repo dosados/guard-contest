@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import math
 import statistics
 from datetime import datetime, timedelta
 from typing import Any, Mapping
 
+from shared.global_category_aggregates import GLOBAL_CATEGORY_FEATURE_NAMES as _GLOBAL_CATEGORY_FEATURE_NAMES
 from shared.parquet_batch_aggregates import UserAggregates, WindowTxn, row_to_window_txn
 
 logger = logging.getLogger(__name__)
@@ -23,46 +23,33 @@ def _percentile_95(values: list[float]) -> float:
     idx = int(math.floor(0.95 * (n - 1)))
     return float(xs[idx])
 
-FEATURE_NAMES: list[str] = [
+_BASE_LOCAL_FEATURE_NAMES: tuple[str, ...] = (
     "operation_amt",
     "log_1_plus_transactions_seen",
     "amount_zscore",
-    "is_amount_high",
     "transactions_last_24h",
     "sum_amount_last_1h",
     "max_amount_last_24h",
     "is_new_device",
     "is_new_mcc",
     "is_new_channel",
-    "is_compromised_device",
-    "web_rdp_connection",
     "phone_voip_call_state",
     "hour",
     "day_of_week",
     "is_night_transaction",
     "is_weekend",
-    "transactions_last_10m",
     "sum_amount_last_24h",
     "time_since_prev_transaction",
-    "is_new_browser_language",
-    "transactions_in_session",
     "timezone_missing",
-    "tr_amount",
-    "event_type_nm",
-    "event_descr",
-    "mcc_code",
     "trend_mean_last_3_to_10",
     "amount_percentile_rank",
     "std_time_deltas",
-    "is_new_device_tz_pair",
     "is_device_switch",
     "is_mcc_switch",
-    "session_duration",
     "session_mean_amount",
     "device_freq",
     "delta_1",
     "delta_2",
-    "delta_3",
     "acceleration_delta_1_over_2",
     "std_delta_last_k",
     "time_since_last_device_change",
@@ -73,7 +60,6 @@ FEATURE_NAMES: list[str] = [
     "event_type_nm_freq_last_1h",
     "event_type_nm_freq_last_6h",
     "event_type_nm_freq_last_24h",
-    "mcc_freq_last_1h",
     "mcc_freq_last_6h",
     "mcc_freq_last_24h",
     "mcc_event_descr_pair_new",
@@ -82,22 +68,17 @@ FEATURE_NAMES: list[str] = [
     "amount_ratio_to_window_median",
     "amount_iqr_normalized",
     "amount_cv_in_window",
-    "sum_amount_last_10m",
     "transactions_last_1h",
     "unique_mcc_count_suffix",
     "unique_device_key_count_suffix",
     "unique_channel_key_count_suffix",
     "unique_timezone_count_suffix",
-    "unique_browser_language_count_suffix",
     "mcc_switch_count_last_20_tx",
     "device_switch_count_last_20_tx",
     "channel_switch_count_last_20_tx",
-    "night_transaction_share_last_24h",
     "distinct_hours_active_last_24h",
     "mean_amount_last_3_transactions",
     "amount_ratio_to_min_amount_24h",
-    "compromised_history_count_suffix",
-    "seconds_since_last_compromised_tx",
     "web_rdp_count_last_24h",
     "voip_flag_count_last_24h",
     "channel_relative_freq",
@@ -105,43 +86,45 @@ FEATURE_NAMES: list[str] = [
     "browser_language_relative_freq",
     "event_type_nm_share_in_suffix",
     "mcc_consecutive_streak_length",
-    "transactions_last_5m",
     "mean_gap_seconds_last_5_intervals",
     "suffix_time_span_hours_log1p",
     "transactions_per_span_hour",
     "mcc_amount_std_same_5d",
     "weekend_transaction_share_last_7d",
     "distinct_event_descr_count_last_24h_norm",
-    "is_new_timezone",
-    "is_timezone_change",
-    "currency_iso_cd_cat",
-    "pos_cd_cat",
-    "accept_language_cat",
     "battery_level",
-    "battery_very_low_flag",
-    "screen_size_cat",
     "developer_tools_flag",
     "accept_lang_browser_lang_mismatch",
-    "battery_very_low_and_night",
     "amount_diff_prev",
     "amount_ratio_prev",
-    "amount_change_sign",
     "amount_increase_streak_suffix",
     "amount_decrease_streak_suffix",
     "is_new_session_id",
     "session_switch_count_last_20_tx",
     "seconds_since_session_start_in_window",
-]
+    "mcc_same_count_suffix",
+    "sum_amount_same_mcc_suffix",
+    "mean_amount_same_mcc_suffix",
+    "std_amount_same_mcc_suffix",
+    "min_amount_same_mcc_suffix",
+    "max_amount_same_mcc_suffix",
+    "share_mcc_cnt_suffix",
+    "share_mcc_sum_suffix",
+    "amount_ratio_mean_same_mcc",
+    "amount_minus_mean_same_mcc",
+    "zscore_amount_same_mcc",
+    "days_since_last_same_mcc",
+    "mcc_channel_same_count_suffix",
+    "is_new_mcc_channel_pair",
+    "mcc_device_same_count_suffix",
+    "is_new_mcc_device_pair",
+    "mcc_rdp_count_suffix",
+    "share_mcc_rdp_suffix",
+    "hour_mean_same_mcc_suffix",
+    "hour_std_same_mcc_suffix",
+)
 
-
-def cat_to_float(s: Any) -> float:
-    if s is None:
-        return 0.0
-    t = str(s).strip()
-    if not t:
-        return 0.0
-    h = hashlib.md5(t.encode("utf-8")).hexdigest()
-    return float(int(h, 16) % 1_000_000)
+FEATURE_NAMES: list[str] = list(_BASE_LOCAL_FEATURE_NAMES) + list(_GLOBAL_CATEGORY_FEATURE_NAMES)
 
 
 def _parse_event_type_nm(v: Any) -> float:
@@ -187,18 +170,6 @@ def _safe_div(num: float, den: float) -> float:
     return num / d
 
 
-def _compromised_binary(v: Any) -> float:
-    if _empty_str(v):
-        return 0.0
-    try:
-        x = float(v)
-    except (TypeError, ValueError):
-        return 0.0
-    if not math.isfinite(x):
-        return 0.0
-    return 1.0 if x == 1.0 else 0.0
-
-
 def _parse_battery_level(v: Any) -> float:
     if v is None:
         return float("nan")
@@ -215,16 +186,6 @@ def _parse_battery_level(v: Any) -> float:
         return x if math.isfinite(x) else float("nan")
     except (TypeError, ValueError):
         return float("nan")
-
-
-def _battery_very_low_flag(level: float) -> float:
-    if not math.isfinite(level):
-        return 0.0
-    if 0.0 <= level <= 1.0 and level < 0.2:
-        return 1.0
-    if 1.0 < level <= 100.0 and level < 20.0:
-        return 1.0
-    return 0.0
 
 
 def _developer_tools_flag(v: Any) -> float:
@@ -314,7 +275,6 @@ def compute_features(
 
     last_txn: WindowTxn | None = window[-1] if window else None
     last_amount = last_txn.amount if last_txn is not None else None
-    last_tz = last_txn.tz if last_txn is not None else None
     last_mcc = last_txn.mcc if last_txn is not None else None
     last_dkey = (last_txn.os_type, last_txn.dev_ver) if last_txn is not None else (None, None)
 
@@ -342,12 +302,10 @@ def compute_features(
     seen_mcc: dict[Any, int] = {}
     seen_channels: dict[tuple[Any, Any], int] = {}
     seen_tz: dict[Any, int] = {}
-    seen_device_tz: dict[tuple[Any, Any, Any], int] = {}
     seen_bl: dict[Any, int] = {}
     session_counts: dict[Any, int] = {}
     session_amount_sums: dict[Any, float] = {}
     session_first_dttm: dict[Any, datetime] = {}
-    session_last_dttm: dict[Any, datetime] = {}
     for t in window:
         dkey = (t.os_type, t.dev_ver)
         ckey = (t.ch_type, t.ch_sub)
@@ -359,9 +317,6 @@ def compute_features(
             seen_channels[ckey] = seen_channels.get(ckey, 0) + 1
         if not _empty_str(t.tz):
             seen_tz[t.tz] = seen_tz.get(t.tz, 0) + 1
-        if (not _empty_str(t.os_type) or not _empty_str(t.dev_ver)) and not _empty_str(t.tz):
-            dtz_key = (t.os_type, t.dev_ver, t.tz)
-            seen_device_tz[dtz_key] = seen_device_tz.get(dtz_key, 0) + 1
         if not _empty_str(t.browser_language):
             seen_bl[t.browser_language] = seen_bl.get(t.browser_language, 0) + 1
         sid = t.session_id
@@ -371,11 +326,8 @@ def compute_features(
                 session_amount_sums[sid] = session_amount_sums.get(sid, 0.0) + float(t.amount)
             if t.dttm is not None:
                 prev_first = session_first_dttm.get(sid)
-                prev_last = session_last_dttm.get(sid)
                 if prev_first is None or t.dttm < prev_first:
                     session_first_dttm[sid] = t.dttm
-                if prev_last is None or t.dttm > prev_last:
-                    session_last_dttm[sid] = t.dttm
 
     os_c = row.get("operating_system_type")
     dev_c = row.get("device_system_version")
@@ -388,7 +340,6 @@ def compute_features(
 
     dkey_c = (os_c, dev_c)
     ckey_c = (ch_t, ch_s)
-    dtz_key_c = (os_c, dev_c, tz_c)
     device_count_i = int(seen_devices.get(dkey_c, 0)) if (not _empty_str(os_c) or not _empty_str(dev_c)) else 0
     mcc_count_i = int(seen_mcc.get(mcc_c, 0)) if not _empty_str(mcc_c) else 0
     channel_count_i = int(seen_channels.get(ckey_c, 0)) if (not _empty_str(ch_t) or not _empty_str(ch_s)) else 0
@@ -398,12 +349,6 @@ def compute_features(
     is_new_device = 1.0 if (not _empty_str(os_c) or not _empty_str(dev_c)) and device_count_i == 0 else 0.0
     is_new_mcc = 1.0 if not _empty_str(mcc_c) and mcc_count_i == 0 else 0.0
     is_new_channel = 1.0 if (not _empty_str(ch_t) or not _empty_str(ch_s)) and channel_count_i == 0 else 0.0
-    is_new_browser_language = 1.0 if not _empty_str(bl_c) and bl_count_i == 0 else 0.0
-    is_new_device_tz_pair = (
-        1.0
-        if (not _empty_str(os_c) or not _empty_str(dev_c)) and not _empty_str(tz_c) and seen_device_tz.get(dtz_key_c, 0) == 0
-        else 0.0
-    )
 
     n_sess = session_counts.get(sid_c, 0) if sid_c is not None else 0
     if sid_c is not None and sid_c in session_counts:
@@ -413,21 +358,10 @@ def compute_features(
     else:
         session_mean_amount = float("nan")
 
-    sf = session_first_dttm.get(sid_c) if sid_c is not None else None
-    sl = session_last_dttm.get(sid_c) if sid_c is not None else None
-    if sf is not None and sl is not None:
-        session_duration = float((sl - sf).total_seconds())
-    else:
-        session_duration = float("nan")
-
     if not math.isnan(std) and std > 0.0 and not math.isnan(amount):
         amount_zscore = (amount - mean) / std
     else:
         amount_zscore = float("nan")
-
-    is_amount_high = 0.0
-    if not math.isnan(p95) and not math.isnan(amount) and amount > p95:
-        is_amount_high = 1.0
 
     max24 = max_since_24h()
     if math.isnan(max24):
@@ -463,15 +397,6 @@ def compute_features(
     else:
         std_time_deltas = float("nan")
 
-    amount_change_sign = float("nan")
-    if math.isfinite(amount_diff_prev):
-        if abs(amount_diff_prev) < EPS:
-            amount_change_sign = 0.0
-        elif amount_diff_prev > 0.0:
-            amount_change_sign = 1.0
-        else:
-            amount_change_sign = -1.0
-
     amount_inc_streak = amount_dec_streak = 0
     if len(amounts) >= 2:
         j = len(amounts) - 1
@@ -488,13 +413,11 @@ def compute_features(
 
     delta_1 = deltas[-1] if len(deltas) >= 1 else float("nan")
     delta_2 = deltas[-2] if len(deltas) >= 2 else float("nan")
-    delta_3 = deltas[-3] if len(deltas) >= 3 else float("nan")
     acceleration = _safe_div(delta_1, delta_2) if (not math.isnan(delta_1) and not math.isnan(delta_2)) else float("nan")
 
     last_k = deltas[-10:]
     if len(last_k) >= 2:
         std_delta_last_k = float(statistics.stdev(last_k))
-        mean_delta_last_k = float(statistics.mean(last_k))
     else:
         std_delta_last_k = float("nan")
 
@@ -529,13 +452,10 @@ def compute_features(
         is_night = float("nan")
         is_weekend = float("nan")
 
-    tx_10m = float(count_since(timedelta(minutes=10)))
-    tx_5m = float(count_since(timedelta(minutes=5)))
     tx_1h = float(count_since(timedelta(hours=1)))
     tx_24h = float(count_since(timedelta(hours=24)))
     sum_1h = sum_since(timedelta(hours=1))
     sum_24h = sum_since(timedelta(hours=24))
-    sum_amount_last_10m = sum_since(timedelta(minutes=10))
 
     # Frequencies and pair novelty (depend on exact strings in window).
     descr_c = "" if _empty_str(descr) else str(descr).strip()
@@ -592,7 +512,6 @@ def compute_features(
     event_type_nm_freq_last_1h = _freq_last(thr_1h, kind="event_type_nm")
     event_type_nm_freq_last_6h = _freq_last(thr_6h, kind="event_type_nm")
     event_type_nm_freq_last_24h = _freq_last(thr_24h, kind="event_type_nm")
-    mcc_freq_last_1h = _freq_last(thr_1h, kind="mcc")
     mcc_freq_last_6h = _freq_last(thr_6h, kind="mcc")
     mcc_freq_last_24h = _freq_last(thr_24h, kind="mcc")
 
@@ -663,7 +582,6 @@ def compute_features(
     udev: set[tuple[Any, Any]] = set()
     uch: set[tuple[Any, Any]] = set()
     utz: set[str] = set()
-    ubl: set[str] = set()
     for t in window:
         if not _empty_str(t.mcc):
             umcc.add(str(t.mcc).strip())
@@ -673,8 +591,6 @@ def compute_features(
             uch.add((t.ch_type, t.ch_sub))
         if not _empty_str(t.tz):
             utz.add(str(t.tz).strip())
-        if not _empty_str(t.browser_language):
-            ubl.add(str(t.browser_language).strip())
 
     Lsw = min(20, n_win)
     mcc_switch_cnt = dev_switch_cnt = ch_switch_cnt = 0
@@ -689,21 +605,14 @@ def compute_features(
             if (a.ch_type, a.ch_sub) != (b.ch_type, b.ch_sub):
                 ch_switch_cnt += 1
 
-    night_share_24h = 0.0
     distinct_hours_24h = 0.0
     if thr_24h is not None:
         hrs24: set[int] = set()
-        cnt24 = night24 = 0
         for t in window:
             if t.dttm is None or t.dttm < thr_24h:
                 continue
-            cnt24 += 1
             h = t.dttm.hour
             hrs24.add(h)
-            if h >= 22 or h < 6:
-                night24 += 1
-        if cnt24 > 0:
-            night_share_24h = float(night24) / float(cnt24)
         distinct_hours_24h = float(len(hrs24)) / 24.0
 
     amount_ratio_to_min_amount_24h = float("nan")
@@ -718,15 +627,6 @@ def compute_features(
             amin = min(mins)
             if amin > EPS:
                 amount_ratio_to_min_amount_24h = amount / amin
-
-    compromised_hist = 0
-    secs_since_compromised = float("nan")
-    if dttm is not None:
-        compromised_hist = sum(1 for t in window if _compromised_binary(t.compromised) == 1.0)
-        for t in reversed(window):
-            if _compromised_binary(t.compromised) == 1.0 and t.dttm is not None:
-                secs_since_compromised = float((dttm - t.dttm).total_seconds())
-                break
 
     web_rdp_cnt_24h = voip_cnt_24h = 0
     if thr_24h is not None:
@@ -802,29 +702,11 @@ def compute_features(
                 dset.add(ed)
         descr_div_24h = float(len(dset)) / float(max(1, cntd))
 
-    is_new_timezone = 1.0 if (not _empty_str(tz_c) and timezone_count_i == 0) else 0.0
-    is_timezone_change = (
-        1.0
-        if (
-            not _empty_str(tz_c)
-            and last_tz is not None
-            and not _empty_str(last_tz)
-            and str(tz_c).strip() != str(last_tz).strip()
-        )
-        else 0.0
-    )
-
     battery_level_v = _parse_battery_level(row.get("battery"))
-    battery_very_low_f = _battery_very_low_flag(battery_level_v)
     developer_tools_f = _developer_tools_flag(row.get("developer_tools"))
     acc_s = "" if _empty_str(row.get("accept_language")) else str(row.get("accept_language")).strip()
     bl_cmp = "" if _empty_str(bl_c) else str(bl_c).strip()
     accept_lang_browser_mismatch = 1.0 if (acc_s and bl_cmp and acc_s != bl_cmp) else 0.0
-    battery_very_low_and_night = (
-        1.0
-        if (battery_very_low_f == 1.0 and not math.isnan(is_night) and is_night == 1.0)
-        else 0.0
-    )
 
     is_new_session_id = 1.0 if (sid_c is not None and not _empty_str(sid_c) and n_sess == 0) else 0.0
     Lsess = min(20, n_win)
@@ -843,6 +725,95 @@ def compute_features(
         else:
             seconds_since_session_start_in_window = 0.0
 
+    mcc_same_cnt_d = 0.0
+    sum_amt_same_mcc = 0.0
+    mean_amt_same_mcc = float("nan")
+    std_amt_same_mcc = float("nan")
+    min_amt_same_mcc = float("nan")
+    max_amt_same_mcc = float("nan")
+    share_mcc_cnt = float("nan")
+    share_mcc_sum = float("nan")
+    amount_ratio_mean_same_mcc = float("nan")
+    amount_minus_mean_same_mcc = float("nan")
+    zscore_amt_same_mcc = float("nan")
+    days_since_last_same_mcc = float("nan")
+    mcc_ch_same_d = 0.0
+    is_new_mcc_ch_pair = 0.0
+    mcc_dev_same_d = 0.0
+    is_new_mcc_dev_pair = 0.0
+    mcc_rdp_same_d = 0.0
+    share_mcc_rdp = float("nan")
+    hour_mean_same_mcc = float("nan")
+    hour_std_same_mcc = float("nan")
+
+    if mcc_c_s:
+        mcc_same_cnt = 0
+        amt_same: list[float] = []
+        hours_same: list[int] = []
+        mcc_ch_same = 0
+        mcc_dev_same = 0
+        mcc_rdp_same = 0
+        last_same_dttm: datetime | None = None
+        for t in window:
+            tm = "" if _empty_str(t.mcc) else str(t.mcc).strip()
+            if tm != mcc_c_s:
+                continue
+            mcc_same_cnt += 1
+            if t.amount is not None and math.isfinite(t.amount):
+                fa = float(t.amount)
+                amt_same.append(fa)
+                sum_amt_same_mcc += fa
+            hours_same.append(t.dttm.hour if t.dttm is not None else -1)
+            if (t.ch_type, t.ch_sub) == ckey_c and (not _empty_str(ch_t) or not _empty_str(ch_s)):
+                mcc_ch_same += 1
+            if (t.os_type, t.dev_ver) == dkey_c and (not _empty_str(os_c) or not _empty_str(dev_c)):
+                mcc_dev_same += 1
+            if not _empty_str(t.web_rdp):
+                mcc_rdp_same += 1
+        for t in reversed(window):
+            tm = "" if _empty_str(t.mcc) else str(t.mcc).strip()
+            if tm != mcc_c_s:
+                continue
+            if t.dttm is not None:
+                last_same_dttm = t.dttm
+                break
+        if amt_same:
+            min_amt_same_mcc = float(min(amt_same))
+            max_amt_same_mcc = float(max(amt_same))
+            mean_amt_same_mcc = float(statistics.mean(amt_same))
+            if len(amt_same) >= 2:
+                std_amt_same_mcc = float(statistics.stdev(amt_same))
+        mcc_same_cnt_d = float(mcc_same_cnt)
+        if n_win > 0:
+            share_mcc_cnt = float(mcc_same_cnt) / float(n_win)
+        sum_all_win = 0.0
+        for t in window:
+            if t.amount is not None and math.isfinite(t.amount):
+                sum_all_win += float(t.amount)
+        if sum_all_win > EPS:
+            share_mcc_sum = sum_amt_same_mcc / sum_all_win
+        if not math.isnan(mean_amt_same_mcc) and abs(mean_amt_same_mcc) > EPS:
+            amount_ratio_mean_same_mcc = amount / mean_amt_same_mcc
+        if not math.isnan(mean_amt_same_mcc) and math.isfinite(amount):
+            amount_minus_mean_same_mcc = amount - mean_amt_same_mcc
+        if not math.isnan(std_amt_same_mcc) and std_amt_same_mcc > EPS and math.isfinite(amount):
+            zscore_amt_same_mcc = (amount - mean_amt_same_mcc) / std_amt_same_mcc
+        if dttm is not None and last_same_dttm is not None:
+            days_since_last_same_mcc = (dttm - last_same_dttm).total_seconds() / 86400.0
+        mcc_ch_same_d = float(mcc_ch_same)
+        if not _empty_str(ch_t) or not _empty_str(ch_s):
+            is_new_mcc_ch_pair = 1.0 if mcc_ch_same == 0 else 0.0
+        mcc_dev_same_d = float(mcc_dev_same)
+        if not _empty_str(os_c) or not _empty_str(dev_c):
+            is_new_mcc_dev_pair = 1.0 if mcc_dev_same == 0 else 0.0
+        mcc_rdp_same_d = float(mcc_rdp_same)
+        if mcc_same_cnt > 0:
+            share_mcc_rdp = float(mcc_rdp_same) / float(mcc_same_cnt)
+        if hours_same:
+            hour_mean_same_mcc = float(statistics.mean(hours_same))
+            if len(hours_same) >= 2:
+                hour_std_same_mcc = float(statistics.stdev(hours_same))
+
     cap = agg.window_transaction_cap
     if cap is None:
         tr_cap = float(tr_amount)
@@ -854,42 +825,29 @@ def compute_features(
         "operation_amt": amount,
         "log_1_plus_transactions_seen": log_1_plus_transactions_seen,
         "amount_zscore": amount_zscore,
-        "is_amount_high": is_amount_high,
         "transactions_last_24h": tx_24h,
         "sum_amount_last_1h": sum_1h,
         "max_amount_last_24h": max_amount_last_24h_feat,
         "is_new_device": is_new_device,
         "is_new_mcc": is_new_mcc,
         "is_new_channel": is_new_channel,
-        "is_compromised_device": _compromised_binary(row.get("compromised")),
-        "web_rdp_connection": _flag_nonempty(row.get("web_rdp_connection")),
         "phone_voip_call_state": _flag_nonempty(row.get("phone_voip_call_state")),
         "hour": hour_f,
         "day_of_week": dow_f,
         "is_night_transaction": is_night,
         "is_weekend": is_weekend,
-        "transactions_last_10m": tx_10m,
         "sum_amount_last_24h": sum_24h,
         "time_since_prev_transaction": time_since_prev,
-        "is_new_browser_language": is_new_browser_language,
-        "transactions_in_session": float(n_sess + 1),
         "timezone_missing": 1.0 if _empty_str(tz_c) else 0.0,
-        "tr_amount": tr_cap,
-        "event_type_nm": event_type_nm_cur,
-        "event_descr": cat_to_float(descr),
-        "mcc_code": cat_to_float(mcc_c),
         "trend_mean_last_3_to_10": trend_mean_last_3_to_10,
         "amount_percentile_rank": amount_percentile_rank,
         "std_time_deltas": std_time_deltas,
-        "is_new_device_tz_pair": is_new_device_tz_pair,
         "is_device_switch": is_device_switch,
         "is_mcc_switch": is_mcc_switch,
-        "session_duration": session_duration,
         "session_mean_amount": session_mean_amount,
         "device_freq": _safe_div(float(device_count_i), float(len(window))) if len(window) > 0 else float("nan"),
         "delta_1": delta_1,
         "delta_2": delta_2,
-        "delta_3": delta_3,
         "acceleration_delta_1_over_2": acceleration,
         "std_delta_last_k": std_delta_last_k,
         "time_since_last_device_change": time_since_last_device_change,
@@ -900,7 +858,6 @@ def compute_features(
         "event_type_nm_freq_last_1h": event_type_nm_freq_last_1h,
         "event_type_nm_freq_last_6h": event_type_nm_freq_last_6h,
         "event_type_nm_freq_last_24h": event_type_nm_freq_last_24h,
-        "mcc_freq_last_1h": mcc_freq_last_1h,
         "mcc_freq_last_6h": mcc_freq_last_6h,
         "mcc_freq_last_24h": mcc_freq_last_24h,
         "mcc_event_descr_pair_new": mcc_event_descr_pair_new,
@@ -909,22 +866,17 @@ def compute_features(
         "amount_ratio_to_window_median": amount_ratio_to_window_median,
         "amount_iqr_normalized": amount_iqr_normalized,
         "amount_cv_in_window": amount_cv_in_window,
-        "sum_amount_last_10m": sum_amount_last_10m,
         "transactions_last_1h": tx_1h,
         "unique_mcc_count_suffix": float(len(umcc)),
         "unique_device_key_count_suffix": float(len(udev)),
         "unique_channel_key_count_suffix": float(len(uch)),
         "unique_timezone_count_suffix": float(len(utz)),
-        "unique_browser_language_count_suffix": float(len(ubl)),
         "mcc_switch_count_last_20_tx": float(mcc_switch_cnt),
         "device_switch_count_last_20_tx": float(dev_switch_cnt),
         "channel_switch_count_last_20_tx": float(ch_switch_cnt),
-        "night_transaction_share_last_24h": night_share_24h,
         "distinct_hours_active_last_24h": distinct_hours_24h,
         "mean_amount_last_3_transactions": mean_last_3,
         "amount_ratio_to_min_amount_24h": amount_ratio_to_min_amount_24h,
-        "compromised_history_count_suffix": float(compromised_hist),
-        "seconds_since_last_compromised_tx": secs_since_compromised,
         "web_rdp_count_last_24h": float(web_rdp_cnt_24h),
         "voip_flag_count_last_24h": float(voip_cnt_24h),
         "channel_relative_freq": channel_rel_freq,
@@ -932,30 +884,40 @@ def compute_features(
         "browser_language_relative_freq": bl_rel_freq,
         "event_type_nm_share_in_suffix": event_type_nm_share_suffix,
         "mcc_consecutive_streak_length": mcc_streak,
-        "transactions_last_5m": tx_5m,
         "mean_gap_seconds_last_5_intervals": mean_gap_last_5,
         "suffix_time_span_hours_log1p": suffix_span_log1p,
         "transactions_per_span_hour": tx_per_span_hour,
         "mcc_amount_std_same_5d": mcc_amount_std_same_5d,
         "weekend_transaction_share_last_7d": weekend_share_7d,
         "distinct_event_descr_count_last_24h_norm": descr_div_24h,
-        "is_new_timezone": is_new_timezone,
-        "is_timezone_change": is_timezone_change,
-        "currency_iso_cd_cat": cat_to_float(row.get("currency_iso_cd")),
-        "pos_cd_cat": cat_to_float(row.get("pos_cd")),
-        "accept_language_cat": cat_to_float(row.get("accept_language")),
         "battery_level": battery_level_v,
-        "battery_very_low_flag": battery_very_low_f,
-        "screen_size_cat": cat_to_float(row.get("screen_size")),
         "developer_tools_flag": developer_tools_f,
         "accept_lang_browser_lang_mismatch": accept_lang_browser_mismatch,
-        "battery_very_low_and_night": battery_very_low_and_night,
         "amount_diff_prev": amount_diff_prev,
         "amount_ratio_prev": amount_ratio_prev,
-        "amount_change_sign": amount_change_sign,
         "amount_increase_streak_suffix": float(amount_inc_streak),
         "amount_decrease_streak_suffix": float(amount_dec_streak),
         "is_new_session_id": is_new_session_id,
         "session_switch_count_last_20_tx": float(session_switch_cnt),
         "seconds_since_session_start_in_window": seconds_since_session_start_in_window,
+        "mcc_same_count_suffix": mcc_same_cnt_d,
+        "sum_amount_same_mcc_suffix": sum_amt_same_mcc,
+        "mean_amount_same_mcc_suffix": mean_amt_same_mcc,
+        "std_amount_same_mcc_suffix": std_amt_same_mcc,
+        "min_amount_same_mcc_suffix": min_amt_same_mcc,
+        "max_amount_same_mcc_suffix": max_amt_same_mcc,
+        "share_mcc_cnt_suffix": share_mcc_cnt,
+        "share_mcc_sum_suffix": share_mcc_sum,
+        "amount_ratio_mean_same_mcc": amount_ratio_mean_same_mcc,
+        "amount_minus_mean_same_mcc": amount_minus_mean_same_mcc,
+        "zscore_amount_same_mcc": zscore_amt_same_mcc,
+        "days_since_last_same_mcc": days_since_last_same_mcc,
+        "mcc_channel_same_count_suffix": mcc_ch_same_d,
+        "is_new_mcc_channel_pair": is_new_mcc_ch_pair,
+        "mcc_device_same_count_suffix": mcc_dev_same_d,
+        "is_new_mcc_device_pair": is_new_mcc_dev_pair,
+        "mcc_rdp_count_suffix": mcc_rdp_same_d,
+        "share_mcc_rdp_suffix": share_mcc_rdp,
+        "hour_mean_same_mcc_suffix": hour_mean_same_mcc,
+        "hour_std_same_mcc_suffix": hour_std_same_mcc,
     }

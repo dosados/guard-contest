@@ -5,7 +5,6 @@ baseline_pr_auc: 0.1312539252 (weighted, как в training/main при eval)
 model: xgboost single: /home/mants/Documents/own/guard-contest/output/model_xgb.json
 val_rows (sample): 600000
 repeats_per_feature: 5
-xgb_segmented_tr_amount: False
 
  rank  feature                                                   mean_drop_pr_auc          std_drop
 ----------------------------------------------------------------------------------------------------

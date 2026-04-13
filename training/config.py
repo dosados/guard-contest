@@ -32,16 +32,6 @@ XGB_PARAM_GRID: dict[str, list[Any]] = {
     "reg_lambda": [5.0],
 }
 
-CATBOOST_PARAMS = {
-    "iterations": 800,
-    "depth": 8,
-    "learning_rate": 0.05,
-    "loss_function": "Logloss",
-    "eval_metric": "PRAUC",
-    "random_seed": RANDOM_SEED,
-    "verbose": 100,
-}
-
 XGB_PARAMS = {
     "n_estimators": 600,
     "max_depth": 8,
@@ -60,7 +50,7 @@ XGB_EVAL_VERBOSE_EVERY = 50  # печать каждые N раундов; 0 —
 # Размер батча pyarrow при чтении parquet для QuantileDMatrix + DataIter (training/main.py).
 # Больше — меньше вызовов итератора и накладных расходов, выше пик RAM на батч (~n_rows * n_features * 4 байт
 # для float32 X плюс служебное). Типичный диапазон 500k–2M; при OOM уменьшить.
-XGB_EXTERNAL_PARQUET_BATCH_ROWS = 2_000_000
+XGB_EXTERNAL_PARQUET_BATCH_ROWS = 5_000_000
 
 
 def _load_xgb_hyperparams_from_grid_search() -> dict[str, float | int]:
@@ -96,17 +86,6 @@ def _load_xgb_hyperparams_from_grid_search() -> dict[str, float | int]:
 
 XGB_MODEL_HYPERPARAMS = _load_xgb_hyperparams_from_grid_search()
 
-LGBM_PARAMS = {
-    "n_estimators": 800,
-    "max_depth": -1,
-    "learning_rate": 0.05,
-    "num_leaves": 64,
-    "subsample": 0.8,
-    "colsample_bytree": 0.8,
-    "random_state": RANDOM_SEED,
-    "verbose": -1,
-}
-
 RF_PARAMS = {
     "n_estimators_total": 400,
     "trees_per_batch": 8,
@@ -114,13 +93,5 @@ RF_PARAMS = {
     "max_features": "sqrt",
     "min_samples_leaf": 8,
     "n_jobs": -1,
-    "random_state": RANDOM_SEED,
-}
-
-LR_PARAMS = {
-    "alpha": 1e-4,
-    "penalty": "l2",
-    "fit_intercept": True,
-    "max_iter_per_batch": 1,
     "random_state": RANDOM_SEED,
 }

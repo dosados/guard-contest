@@ -133,7 +133,6 @@ def run_grid_search(
                 path,
                 feature_cols,
                 dttm_col,
-                "tr_amount",
                 cutoff_day,
                 params,
                 ext_train_cache=train_cache,

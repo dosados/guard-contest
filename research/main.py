@@ -9,9 +9,7 @@ Permutation importance на временной валидации для XGBoost
 Метрика: PR-AUC на val с `sample_weight` после `remap_sample_weight_from_dataset`, как при оценке
 XGBoost в training (опционально то же переназначение меток, что и `--xgb-remap-weight2-positives-as-zero`).
 
-Модель:
-- по умолчанию один бустер из `--xgb-model-path` (legacy `model_xgb.json`);
-- `--xgb-segmented`: две модели по `tr_amount`, как в submission / `training --xgb-segmented`.
+Модель: бустер из `--xgb-model-path` (по умолчанию `output/model_xgb.json`).
 
 Предсказание: `iteration_range` по `best_iteration` / `best_ntree_limit`, если есть у загруженного бустера.
 
@@ -41,8 +39,6 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from shared.config import (
-    MODEL_XGB_HIGH_TR_AMOUNT_PATH,
-    MODEL_XGB_LOW_TR_AMOUNT_PATH,
     MODEL_XGB_PATH,
     OUTPUT_DIR,
     TRAIN_DATASET_PATH,
@@ -51,8 +47,6 @@ from shared.config import (
     validate_xgboost_booster_feature_count,
 )
 from training.config import VAL_RATIO
-
-TR_AMOUNT_SPLIT_THRESHOLD = 30.0
 
 logger = logging.getLogger(__name__)
 matplotlib.use("Agg")
@@ -217,26 +211,6 @@ def _predict_proba(booster, x: np.ndarray, feature_cols: list[str]) -> np.ndarra
         except TypeError:
             return np.asarray(booster.predict(d, ntree_limit=int(bnl)), dtype=np.float32)
     return np.asarray(booster.predict(d), dtype=np.float32)
-
-
-def _predict_proba_segmented(
-    low_booster,
-    high_booster,
-    x: np.ndarray,
-    feature_cols: list[str],
-    *,
-    threshold: float = TR_AMOUNT_SPLIT_THRESHOLD,
-) -> np.ndarray:
-    tr_idx = feature_cols.index("tr_amount")
-    tr = x[:, tr_idx]
-    low_mask = tr <= float(threshold)
-    high_mask = ~low_mask
-    out = np.empty(x.shape[0], dtype=np.float32)
-    if bool(low_mask.any()):
-        out[low_mask] = _predict_proba(low_booster, x[low_mask], feature_cols)
-    if bool(high_mask.any()):
-        out[high_mask] = _predict_proba(high_booster, x[high_mask], feature_cols)
-    return out
 
 
 def _compute_permutation_importance(
@@ -478,7 +452,6 @@ def _write_full_permutation_ranking_text(
     val_rows: int,
     repeats: int,
     weighted_metrics: bool,
-    segmented: bool,
 ) -> None:
     lines: list[str] = [
         "Permutation importance — полное ранжирование признаков (XGBoost)",
@@ -489,7 +462,6 @@ def _write_full_permutation_ranking_text(
         f"model: {model_label}",
         f"val_rows (sample): {val_rows}",
         f"repeats_per_feature: {repeats}",
-        f"xgb_segmented_tr_amount: {segmented}",
         "",
         f"{'rank':>5}  {'feature':<52}  {'mean_drop_pr_auc':>20}  {'std_drop':>16}",
         "-" * 100,
@@ -522,15 +494,7 @@ def main() -> None:
         "--xgb-model-path",
         type=Path,
         default=MODEL_XGB_PATH,
-        help="Одиночная XGBoost-модель (по умолчанию output/model_xgb.json). Игнорируется при --xgb-segmented.",
-    )
-    parser.add_argument(
-        "--xgb-segmented",
-        action="store_true",
-        help=(
-            "Две модели по tr_amount, как training/main.py --xgb-segmented: "
-            f"{MODEL_XGB_LOW_TR_AMOUNT_PATH.name} и {MODEL_XGB_HIGH_TR_AMOUNT_PATH.name}."
-        ),
+        help="Путь к XGBoost-модели (по умолчанию output/model_xgb.json).",
     )
     parser.add_argument(
         "--xgb-remap-weight2-positives-as-zero",
@@ -550,22 +514,13 @@ def main() -> None:
             f"Не найден {TRAIN_DATASET_PATH}. "
             "Сначала соберите датасет: ./dataset_cpp/build/build_dataset ."
         )
-    if args.xgb_segmented:
-        if not MODEL_XGB_LOW_TR_AMOUNT_PATH.exists() or not MODEL_XGB_HIGH_TR_AMOUNT_PATH.exists():
-            raise FileNotFoundError(
-                f"Для --xgb-segmented нужны обе модели: {MODEL_XGB_LOW_TR_AMOUNT_PATH} и {MODEL_XGB_HIGH_TR_AMOUNT_PATH}. "
-                "Обучите: PYTHONPATH=. python training/main.py --xgb-config best --xgb-segmented"
-            )
-    elif not args.xgb_model_path.exists():
+    if not args.xgb_model_path.exists():
         raise FileNotFoundError(
             f"Не найдена модель {args.xgb_model_path}. "
             "Сначала обучите XGBoost: PYTHONPATH=. python training/main.py --xgb-config best"
         )
     logger.info("Файл датасета: %s", TRAIN_DATASET_PATH)
-    if args.xgb_segmented:
-        logger.info("XGBoost сегменты: %s | %s", MODEL_XGB_LOW_TR_AMOUNT_PATH, MODEL_XGB_HIGH_TR_AMOUNT_PATH)
-    else:
-        logger.info("Файл XGBoost-модели: %s", args.xgb_model_path)
+    logger.info("Файл XGBoost-модели: %s", args.xgb_model_path)
 
     if args.max_memory_gb <= 1.0:
         raise ValueError("--max-memory-gb должен быть > 1")
@@ -581,9 +536,6 @@ def main() -> None:
         max_memory_gb=args.max_memory_gb,
         safety_factor=args.memory_safety_factor,
     )
-    if args.xgb_segmented and "tr_amount" not in feature_cols:
-        raise ValueError("Для --xgb-segmented в признаках модели должна быть колонка tr_amount.")
-
     cutoff_day = _find_time_cutoff(TRAIN_DATASET_PATH, VAL_RATIO)
     x_train, y_train, w_train, x_val, y_val, w_val = _sample_from_stream(
         TRAIN_DATASET_PATH,
@@ -600,26 +552,13 @@ def main() -> None:
         logger.info("Метки val/train-сэмпла: включено переназначение target=1, sample_weight=2 → 0 (как в training XGB).")
 
     logger.info("=== Permutation importance: xgboost (pretrained) ===")
-    if args.xgb_segmented:
-        low_b = _load_xgb_booster(MODEL_XGB_LOW_TR_AMOUNT_PATH)
-        high_b = _load_xgb_booster(MODEL_XGB_HIGH_TR_AMOUNT_PATH)
-        validate_xgboost_booster_feature_count(low_b)
-        validate_xgboost_booster_feature_count(high_b)
+    booster = _load_xgb_booster(args.xgb_model_path)
+    validate_xgboost_booster_feature_count(booster)
 
-        def predict_fn(x: np.ndarray) -> np.ndarray:
-            return _predict_proba_segmented(low_b, high_b, x, feature_cols)
+    def predict_fn(x: np.ndarray) -> np.ndarray:
+        return _predict_proba(booster, x, feature_cols)
 
-        model_label = (
-            f"xgboost segmented: {MODEL_XGB_LOW_TR_AMOUNT_PATH.name} + {MODEL_XGB_HIGH_TR_AMOUNT_PATH.name}"
-        )
-    else:
-        booster = _load_xgb_booster(args.xgb_model_path)
-        validate_xgboost_booster_feature_count(booster)
-
-        def predict_fn(x: np.ndarray) -> np.ndarray:
-            return _predict_proba(booster, x, feature_cols)
-
-        model_label = f"xgboost single: {args.xgb_model_path}"
+    model_label = f"xgboost: {args.xgb_model_path}"
 
     baseline, importances, stds = _compute_permutation_importance(
         predict_fn=predict_fn,
@@ -682,7 +621,6 @@ def main() -> None:
         val_rows=len(x_val),
         repeats=args.repeats,
         weighted_metrics=True,
-        segmented=bool(args.xgb_segmented),
     )
     top_png, low_png = _plot_summary(summary, out_dir=out_dir, top_k=top_k)
     _write_markdown_report(

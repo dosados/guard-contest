@@ -1,0 +1,113 @@
+// Имена популяционных (глобальных) фич — синхронно с shared/global_category_aggregates.py GLOBAL_CATEGORY_FEATURE_NAMES.
+// Порядок: MCC(20) → channel(20) → TZ×currency(19) → event×currency(22) → совместные C/D(5).
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+
+namespace global_category {
+
+constexpr int64_t kMccGlobalKey = std::numeric_limits<int64_t>::min();
+constexpr int64_t kMccMissingKey = -2;
+
+static const char* kGlobalCategoryFeatureNames[] = {
+    // B: MCC (20)
+    "global_mean_amount_mcc",
+    "global_std_amount_mcc",
+    "global_median_amount_mcc",
+    "global_q25_mcc",
+    "global_q75_mcc",
+    "global_q95_mcc",
+    "global_cnt_mcc",
+    "global_cv_mcc",
+    "fraud_rate_mcc",
+    "fraud_count_mcc",
+    "train_total_count_mcc",
+    "woe_mcc",
+    "amount_ratio_global_mean_mcc",
+    "global_zscore_mcc",
+    "inv_global_cnt_mcc",
+    "global_cnt_clean_mcc",
+    "global_q90_mcc",
+    "global_q99_mcc",
+    "global_zscore_median_iqr_mcc",
+    "amount_percentile_in_mcc",
+    // D.0: channel (20)
+    "global_mean_amount_channel",
+    "global_std_amount_channel",
+    "global_median_amount_channel",
+    "global_q25_channel",
+    "global_q75_channel",
+    "global_q95_channel",
+    "global_cnt_channel",
+    "global_cv_channel",
+    "fraud_rate_channel",
+    "fraud_count_channel",
+    "train_total_count_channel",
+    "woe_channel",
+    "amount_ratio_global_mean_channel",
+    "global_zscore_channel",
+    "inv_global_cnt_channel",
+    "global_cnt_clean_channel",
+    "global_q90_channel",
+    "global_q99_channel",
+    "amount_z_vs_channel_median",
+    "amount_percentile_in_channel",
+    // E.1: timezone × currency (19)
+    "global_mean_amount_tz_currency",
+    "global_std_amount_tz_currency",
+    "global_median_amount_tz_currency",
+    "global_q25_tz_currency",
+    "global_q75_tz_currency",
+    "global_q95_tz_currency",
+    "global_cnt_tz_currency",
+    "global_cv_tz_currency",
+    "fraud_rate_tz_currency",
+    "fraud_count_tz_currency",
+    "train_total_count_tz_currency",
+    "woe_tz_currency",
+    "global_cnt_clean_tz_currency",
+    "global_q90_tz_currency",
+    "global_q99_tz_currency",
+    "amount_z_vs_tz_median",
+    "amount_percentile_in_tz_currency",
+    "inv_global_cnt_tz_currency",
+    "global_zscore_median_iqr_tz_currency",
+    // F: event_type_nm × currency (22)
+    "global_mean_amount_event_type_currency",
+    "global_std_amount_event_type_currency",
+    "global_median_amount_event_type_currency",
+    "global_q25_event_type_currency",
+    "global_q75_event_type_currency",
+    "global_q95_event_type_currency",
+    "global_cnt_event_type_currency",
+    "global_cv_event_type_currency",
+    "fraud_rate_event_type_currency",
+    "fraud_count_event_type_currency",
+    "train_total_count_event_type_currency",
+    "woe_event_type_currency",
+    "global_cnt_clean_event_type_currency",
+    "global_q90_event_type_currency",
+    "global_q99_event_type_currency",
+    "global_type_frequency_log_event_type_currency",
+    "amount_ratio_global_mean_event_type_currency",
+    "global_zscore_event_type_currency",
+    "inv_global_cnt_event_type_currency",
+    "amount_z_vs_event_type_median",
+    "amount_percentile_in_event_type_currency",
+    "global_zscore_median_iqr_event_type_currency",
+    // C.1 / C.2 / D.2 (5)
+    "channel_rarity_neglog_in_mcc",
+    "currency_freq_in_mcc",
+    "timezone_freq_in_mcc",
+    "surprise_mcc_given_channel_neglog",
+    "mcc_not_in_channel_top3_flag",
+};
+
+constexpr int kNumGlobalCategoryFeatures =
+    sizeof(kGlobalCategoryFeatureNames) / sizeof(kGlobalCategoryFeatureNames[0]);
+
+static_assert(kNumGlobalCategoryFeatures == 86, "global category feature count");
+
+}  // namespace global_category

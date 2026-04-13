@@ -12,7 +12,7 @@ import pyarrow.parquet as pq
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Print tr_amount percentiles (0..100 step 10) from a parquet dataset."
+            "Print log_1_plus_transactions_seen percentiles (0..100 step 10) from a parquet dataset."
         )
     )
     parser.add_argument(
@@ -39,26 +39,27 @@ def main() -> None:
 
     parquet_file = pq.ParquetFile(dataset_path)
 
-    if "tr_amount" not in parquet_file.schema.names:
-        raise KeyError("Column 'tr_amount' was not found in dataset.")
+    col = "log_1_plus_transactions_seen"
+    if col not in parquet_file.schema.names:
+        raise KeyError(f"Column '{col}' was not found in dataset.")
 
-    tr_amount_chunks: list[np.ndarray] = []
+    chunks: list[np.ndarray] = []
     for batch in parquet_file.iter_batches(
-        columns=["tr_amount"],
+        columns=[col],
         batch_size=args.batch_size,
     ):
         values = batch.column(0).drop_null().to_numpy(zero_copy_only=False)
         if values.size > 0:
-            tr_amount_chunks.append(values)
+            chunks.append(values)
 
-    if not tr_amount_chunks:
-        raise ValueError("Column 'tr_amount' contains no numeric values.")
+    if not chunks:
+        raise ValueError(f"Column '{col}' contains no numeric values.")
 
-    all_values = np.concatenate(tr_amount_chunks)
+    all_values = np.concatenate(chunks)
     percentile_levels = np.arange(0, 101, 10)
     percentile_values = np.percentile(all_values, percentile_levels)
 
-    print("tr_amount percentiles:")
+    print(f"{col} percentiles:")
     for level, value in zip(percentile_levels, percentile_values):
         print(f"P{int(level):>3}: {float(value)}")
 

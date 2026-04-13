@@ -41,7 +41,7 @@ data/
 
 Пайплайн состоит из трёх основных этапов:
 1) Сборка признакового датасета для обучения (dataset_cpp/build_dataset).
-2) Обучение моделей и выбор лучшей по PR-AUC (training/).
+2) Обучение XGBoost по PR-AUC на валидации (training/).
 3) Построение submission.csv на тестовых данных (submission/).
 
 Признаки считаются онлайн по клиенту:
@@ -91,28 +91,24 @@ data/
 
 Аргумент: необязательный путь к корню репозитория (по умолчанию текущий каталог «.»). Рабочий каталог при запуске должен позволять открыть data/ и писать в output/.
 
-Обучение (training/main.py) само подхватывает либо все output/train_dataset_part_*.parquet, либо один output/train_dataset.parquet, если вы объединили части вручную (pandas/pyarrow).
+Обучение (training/main.py) ожидает один файл output/full_dataset.parquet (см. shared/config.py → TRAIN_DATASET_PATH).
 
-4. ОБУЧЕНИЕ МОДЕЛЕЙ (training/)
+4. ОБУЧЕНИЕ XGBOOST (training/)
 
 Все настройки обучения — в training/config.py:
-- VAL_RATIO — доля данных для валидации (остальное — обучение);
-- параметры моделей: CATBOOST_PARAMS, XGB_PARAMS, LGBM_PARAMS.
+- VAL_RATIO — доля данных для валидации по времени (остальное — обучение);
+- XGB_PARAMS, XGB_MODEL_HYPERPARAMS, ранний останов и размер батча parquet.
 
 Основная точка входа: training/main.py.
 
 Логика:
-1) Загружает датасет: все output/train_dataset_part_*.parquet (если есть) или один output/train_dataset.parquet.
-2) Набор признаков — колонки из FEATURE_NAMES (shared/features.py).
-3) Временное разбиение train/val: сортировка по event_dttm, последние VAL_RATIO — валидация.
-4) Обучает CatBoost, XGBoost, LightGBM с учётом sample_weight.
+1) Загружает датасет output/full_dataset.parquet батчами (pyarrow + DataIter / QuantileDMatrix).
+2) Набор признаков — MODEL_INPUT_FEATURES (shared/config.py), согласован с shared/features.py.
+3) Временное разбиение train/val: по event_dttm, последние VAL_RATIO — валидация.
+4) Обучает XGBoost с учётом sample_weight.
 5) PR-AUC на валидации (sklearn.average_precision_score).
-6) Сохраняет модели: output/model.cbm, model_xgb.json, model_lgb.txt.
-7) Отдельный стриминговый Random Forest: PYTHONPATH=. python training/random_forest.py
-   (сохраняет output/model_rf.joblib).
-8) Отдельная стриминговая логистическая регрессия:
-   PYTHONPATH=. python training/logistic_regression.py
-   (сохраняет output/model_lr.joblib).
+6) Сохраняет output/model_xgb.json.
+7) Опционально: стриминговый Random Forest — PYTHONPATH=. python training/random_forest.py (output/model_rf.joblib).
 
 Запуск:
   PYTHONPATH=. python training/main.py
@@ -121,30 +117,28 @@ data/
 
 Точка входа: submission/main.py.
 
-Аргументы: --model / -m — catboost | xgboost | lightgbm | random_forest | logistic_regression.
-
 Логика:
-1) Загружает обученную модель из output/.
+1) Загружает output/model_xgb.json.
 2) Оконные агрегаты по data/test/pretest.parquet (shared.parquet_batch_aggregates).
 3) По data/test/test.parquet: фичи compute_features → предсказание → update агрегатов.
 4) output/submission.csv: event_id, predict (логит).
 
 Запуск:
-  PYTHONPATH=. python submission/main.py --model catboost
+  PYTHONPATH=. python submission/main.py
 
 6. ВСПОМОГАТЕЛЬНЫЕ СКРИПТЫ (scripts/)
 
 scripts/data_transactions_distribution.py — распределение транзакций на пользователя по parquet в data/.
 
-scripts/feature_target_correlation.py — корреляции фичей с target по train_dataset (и опционально важности CatBoost).
+scripts/feature_target_correlation.py — корреляции фичей с target по train-датасету (и графики).
 
 scripts/feature_stats.py — сравнение средних фич train vs test.
 
 7. КРАТКО: КАК ПОЛУЧИТЬ submission.csv
 
 1) Подготовить data/ (train/, test/, train_labels.parquet).
-2) Собрать и запустить build_dataset из dataset_cpp (см. п. 3) из корня репозитория → output/train_dataset_part_*.parquet.
+2) Собрать и запустить build_dataset из dataset_cpp (см. п. 3) из корня репозитория → output/full_dataset.parquet.
 3) PYTHONPATH=. python training/main.py
-4) PYTHONPATH=. python submission/main.py --model catboost → output/submission.csv
+4) PYTHONPATH=. python submission/main.py → output/submission.csv
 
 Эта последовательность соответствует текущему коду репозитория.
