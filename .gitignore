@@ -1,42 +1,39 @@
 data/train/*
+!data/train/*.md
 data/test/*
+!data/test/*.md
 
-# Parquet
 *.parquet
 
-# CatBoost training artifacts
 catboost_info/
 *.tfevents
 *.tmp
 
-# Model weights (any location)
 *.cbm
 *.joblib
+*.pt
+*.pth
 
-# CMake / C++ out-of-tree build
-dataset_cpp/build/
-training/cpp/build/
+output/weights/**
+
+tmp
 
 saves
 
 output/xgb_extmem_train_single/
 output/xgb_extmem_val_single/
 
-
-# output/: игнорируем тяжёлые датасеты и модели; графики (.png), отчёты (.md, .txt) и CSV в research/ — в репозитории
-output/full_dataset.parquet
+output/models/**/*
+output/cache/**/*
 output/model_xgb.json
 output/model_xgb_tr_amount_le_30.json
 output/model_xgb_tr_amount_gt_30.json
 output/model_xgb_tr_amount_le_110.json
 output/model_xgb_tr_amount_gt_110.json
 
-# Кэш TSV для CatBoost (генерируется из parquet)
 output/*_tsv_cache/
 
-output/weights/model_torch_mlp.pt
 output/model_lgb.txt
-output/model_pytorch.pt
 output/xgb_grid_extmem_train/
 output/xgb_grid_extmem_val/
 output/xgb_extmem_train_tr_amount_le_30/
@@ -44,17 +41,14 @@ output/xgb_extmem_val_tr_amount_le_30/
 output/xgb_extmem_train_tr_amount_gt_30/
 output/xgb_extmem_val_tr_amount_gt_30/
 
-# CSV (submission и прочее; исключение — таблицы исследований)
 *.csv
-!output/research/*.csv
+!output/research/**/*.csv
 
-# Служебные JSONL артефакты обучения/поиска
 training/grid_search/model_xgb_best.json
 training/grid_search/xgb_best_params_save.json
 training/grid_search/xgb_grid_trials.jsonl
 output/research/xgb_forward_selection_history.jsonl
 
-# Python cache / packaging
 __pycache__/
 *.py[cod]
 *$py.class
@@ -64,33 +58,11 @@ __pycache__/
 /dist/
 build/
 
-# Tooling caches
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 .coverage
 htmlcov/
 
-# Virtual environments
-.venv/
-venv/
-ENV/
-env/
 
-# Jupyter
-.ipynb_checkpoints/
 
-# Secrets / local env
-.env
-.env.*
-!.env.example
-
-# IDE / OS
-.idea/
-*.swp
-*.swo
-.DS_Store
-Thumbs.db
-
-# Logs
-*.log

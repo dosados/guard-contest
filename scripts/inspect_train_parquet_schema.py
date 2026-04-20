@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-"""Печать схемы output/full_dataset.parquet и примеров типов (event_dttm и др.)."""
-
 from __future__ import annotations
 
 import sys
@@ -18,7 +16,7 @@ from shared.config import TRAIN_DATASET_PATH  # noqa: E402
 def main() -> int:
     path = TRAIN_DATASET_PATH
     if not path.is_file():
-        print(f"Нет файла: {path}", file=sys.stderr)
+        print(f"Missing file: {path}", file=sys.stderr)
         return 1
     pf = pq.ParquetFile(path)
     print("Schema:")

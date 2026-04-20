@@ -1,5 +1,3 @@
-"""Параметры обучения и валидации."""
-
 from __future__ import annotations
 
 import json
@@ -7,20 +5,17 @@ import logging
 from pathlib import Path
 from typing import Any
 
-# Список признаков на вход модели: shared.config.MODEL_INPUT_FEATURES (все FEATURE_NAMES).
+# Model input feature list: shared.config.MODEL_INPUT_FEATURES 
 
 logger = logging.getLogger(__name__)
 
-# Доля валидации по времени (последние VAL_RATIO строк после сортировки по event_dttm)
 VAL_RATIO = 0.15
 RANDOM_SEED = 42
 
 GRID_SEARCH_DIR = Path(__file__).resolve().parent / "grid_search"
 XGB_BEST_PARAMS_PATH = GRID_SEARCH_DIR / "xgb_best_params.json"
+CAT_BEST_PARAMS_PATH = GRID_SEARCH_DIR / "cat_best_params.json"
 
-# Единственное место, где задаётся сетка гиперпараметров для полного перебора
-# (training/xgb_grid_search.py). Ключи — те же, что использует training/main._build_xgb_train_params
-# (через XGB_MODEL_HYPERPARAMS после сохранения лучшего JSON).
 XGB_PARAM_GRID: dict[str, list[Any]] = {
     "learning_rate": [0.05],
     "max_depth": [6,5,4],
@@ -43,14 +38,17 @@ XGB_PARAMS = {
     "eval_metric": "aucpr",
 }
 
-# Мониторинг eval_metric (aucpr) на val при обучении в training/main.py
-XGB_EARLY_STOPPING_ROUNDS = 50  # 0 — только evals, без остановки
-XGB_EVAL_VERBOSE_EVERY = 50  # печать каждые N раундов; 0 — тихо
+XGB_EARLY_STOPPING_ROUNDS = 50  # 0 = eval only, no early stopping
+XGB_EVAL_VERBOSE_EVERY = 50  # log every N rounds; 0 = silent
 
-# Размер батча pyarrow при чтении parquet для QuantileDMatrix + DataIter (training/main.py).
-# Больше — меньше вызовов итератора и накладных расходов, выше пик RAM на батч (~n_rows * n_features * 4 байт
-# для float32 X плюс служебное). Типичный диапазон 500k–2M; при OOM уменьшить.
-XGB_EXTERNAL_PARQUET_BATCH_ROWS = 5_000_000
+# Parquet batch rows for QuantileDMatrix DataIter; override via GUARD_XGB_PARQUET_BATCH_ROWS.
+XGB_EXTERNAL_PARQUET_BATCH_ROWS = 1_000_000
+
+CAT_MAX_TRAIN_ROWS = 2_000_000
+CAT_MAX_VAL_ROWS = 600_000
+CAT_PARQUET_BATCH_SIZE = 250_000
+CATBOOST_ITERATIONS = 600
+CATBOOST_GRID_ITERATIONS = 200
 
 
 def _load_xgb_hyperparams_from_grid_search() -> dict[str, float | int]:
@@ -80,18 +78,42 @@ def _load_xgb_hyperparams_from_grid_search() -> dict[str, float | int]:
             "reg_lambda": float(hp.get("reg_lambda", defaults["reg_lambda"])),
         }
     except Exception as exc:
-        logger.warning("Не удалось прочитать %s: %s", XGB_BEST_PARAMS_PATH, exc)
+        logger.warning("Could not read %s: %s", XGB_BEST_PARAMS_PATH, exc)
         return defaults
 
 
 XGB_MODEL_HYPERPARAMS = _load_xgb_hyperparams_from_grid_search()
 
-RF_PARAMS = {
-    "n_estimators_total": 400,
-    "trees_per_batch": 8,
-    "max_depth": 18,
-    "max_features": "sqrt",
-    "min_samples_leaf": 8,
-    "n_jobs": -1,
-    "random_state": RANDOM_SEED,
+CAT_PARAM_GRID: dict[str, list[Any]] = {
+    "depth": [6, 8],
+    "learning_rate": [0.05, 0.03],
+    "l2_leaf_reg": [3.0, 5.0],
 }
+
+_CAT_DEFAULTS: dict[str, float | int] = {
+    "depth": 8,
+    "learning_rate": 0.05,
+    "l2_leaf_reg": 3.0,
+    "random_seed": RANDOM_SEED,
+}
+
+
+def _load_cat_hyperparams_from_grid_search() -> dict[str, float | int]:
+    defaults = dict(_CAT_DEFAULTS)
+    if not CAT_BEST_PARAMS_PATH.exists():
+        return defaults
+    try:
+        payload = json.loads(CAT_BEST_PARAMS_PATH.read_text(encoding="utf-8"))
+        hp = payload.get("hyperparameters", {})
+        return {
+            "depth": int(hp.get("depth", defaults["depth"])),
+            "learning_rate": float(hp.get("learning_rate", defaults["learning_rate"])),
+            "l2_leaf_reg": float(hp.get("l2_leaf_reg", defaults["l2_leaf_reg"])),
+            "random_seed": int(hp.get("random_seed", defaults["random_seed"])),
+        }
+    except Exception as exc:
+        logger.warning("Could not read %s: %s", CAT_BEST_PARAMS_PATH, exc)
+        return defaults
+
+
+CAT_MODEL_HYPERPARAMS = _load_cat_hyperparams_from_grid_search()

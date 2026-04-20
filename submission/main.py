@@ -1,7 +1,3 @@
-"""
-Построение output/submission.csv: pretest → агрегаты, test → те же фичи, что при обучении, предсказание логита (XGBoost).
-"""
-
 from __future__ import annotations
 
 import logging
@@ -21,8 +17,9 @@ from shared.config import (
     GLOBAL_CATEGORY_AGGREGATES_DIR,
     MODEL_INPUT_FEATURES,
     MODEL_XGB_PATH,
-    OUTPUT_DIR,
     PRETEST_PATH,
+    SUBMISSION_DIR,
+    SUBMISSION_XGB_PATH,
     TEST_PATH,
     validate_model_input_dataframe,
     validate_xgboost_booster_feature_count,
@@ -45,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 
 def _xgboost_predict_probs(booster, X: pd.DataFrame, feature_cols: list[str]) -> np.ndarray:
-    """Согласовано с training/main.py: при early stopping — только деревья до best_iteration."""
+    # predict up to best_iteration when early stopping was used
     import xgboost as xgb
 
     d = xgb.DMatrix(X[feature_cols], feature_names=feature_cols)
@@ -73,7 +70,7 @@ def load_xgboost_predictor():
     from xgboost import XGBClassifier
 
     if not MODEL_XGB_PATH.exists():
-        raise FileNotFoundError(f"Не найдена XGBoost модель: {MODEL_XGB_PATH}")
+        raise FileNotFoundError(f"XGBoost model not found: {MODEL_XGB_PATH}")
     m = XGBClassifier()
     m.load_model(str(MODEL_XGB_PATH))
     booster = m.get_booster()
@@ -95,15 +92,16 @@ def main() -> None:
         datefmt="%H:%M:%S",
     )
     predict_fn = load_xgboost_predictor()
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    SUBMISSION_DIR.mkdir(parents=True, exist_ok=True)
+    MODEL_XGB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     global_cat = GlobalCategoryLookups(GLOBAL_CATEGORY_AGGREGATES_DIR)
-    logger.info("Глобальные агрегаты: %s", GLOBAL_CATEGORY_AGGREGATES_DIR)
+    logger.info("Global aggregates: %s", GLOBAL_CATEGORY_AGGREGATES_DIR)
 
     pretest_paths = [PRETEST_PATH] if PRETEST_PATH.exists() else []
     aggregates: defaultdict[object, UserAggregates] = defaultdict(lambda: UserAggregates(unlimited=True))
     if pretest_paths:
-        logger.info("Построение агрегатов по pretest (окно без лимита по числу транзакций): %s", pretest_paths)
+        logger.info("Building aggregates from pretest (unlimited transaction window): %s", pretest_paths)
         built = build_windowed_aggregates(
             pretest_paths,
             batch_size=BATCH_SIZE,
@@ -113,7 +111,7 @@ def main() -> None:
         for k, v in built.items():
             aggregates[k] = v
     else:
-        logger.warning("Pretest не найден (%s), агрегаты пустые", PRETEST_PATH)
+        logger.warning("Pretest not found (%s), aggregates empty", PRETEST_PATH)
 
     cols = _existing_columns(TEST_PATH, list(FEATURE_COLUMNS))
     if CUSTOMER_ID_COLUMN not in cols:
@@ -125,7 +123,7 @@ def main() -> None:
     feature_matrix: list[dict[str, float]] = []
     customer_row_ids: list[object] = []
 
-    logger.info("Разбор test и расчёт фич: %s", TEST_PATH)
+    logger.info("Parsing test and computing features: %s", TEST_PATH)
     for row in iter_parquet_rows(
         [TEST_PATH],
         columns=cols,
@@ -151,18 +149,18 @@ def main() -> None:
         customer_row_ids.append(cid)
         agg.update(row)
 
-    logger.info("Предсказание: матрица %d × %d", len(feature_matrix), len(MODEL_INPUT_FEATURES))
+    logger.info("Prediction: matrix %d × %d", len(feature_matrix), len(MODEL_INPUT_FEATURES))
     X = pd.DataFrame(feature_matrix)[MODEL_INPUT_FEATURES]
     validate_model_input_dataframe(X)
     logits_arr = predict_fn(X)
 
     out = pd.DataFrame({"event_id": event_ids, "predict": logits_arr.astype(np.float64)})
-    out_path = OUTPUT_DIR / "submission.csv"
+    out_path = SUBMISSION_XGB_PATH
     out.to_csv(out_path, index=False)
 
     if len(out) != EXPECTED_ROWS:
-        logger.warning("Строк %d, ожидалось %d.", len(out), EXPECTED_ROWS)
-    logger.info("Сохранено %d строк в %s", len(out), out_path)
+        logger.warning("Rows %d, expected %d.", len(out), EXPECTED_ROWS)
+    logger.info("Saved %d rows to %s", len(out), out_path)
 
 
 if __name__ == "__main__":

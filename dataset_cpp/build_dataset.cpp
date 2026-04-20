@@ -1,13 +1,3 @@
-// Сборка обучающего датасета: Arrow + Parquet.
-// Train: каждая строка с непустым customer_id → строка в датасет → update окна.
-// История: deque не длиннее kWindowCap; фичи — по суффиксу длины min(stored, W),
-// где W сэмплируется из эмпирического распределения "транзакций на пользователя" из data/test/pretest.parquet.
-// target = 1 если event_id в train_labels.parquet, иначе 0.
-// Порядок обхода: для k=1,2,3 подряд pretrain_part_k → train_part_k; после train_part_k из map
-// удаляются все customer_id, встреченные в этой паре файлов (когорты по номеру части не пересекаются).
-// В выходном parquet строки по-прежнему в порядке train_part_1, train_part_2, train_part_3.
-// Запуск из корня репозитория: ./build_dataset [repo_root]
-
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
@@ -44,7 +34,6 @@
 #include "global_category_features.hpp"
 #include "progress.hpp"
 
-/** Максимум транзакций в deque и верхняя граница активного окна. */
 constexpr int kWindowCap = 512;
 constexpr int kOutBatch = 131072;
 constexpr double kWeightUnlabeled = 1.0;
@@ -157,7 +146,7 @@ static const char* kBaseFeatureNames[] = {
 constexpr int kNumBaseFeatures = sizeof(kBaseFeatureNames) / sizeof(kBaseFeatureNames[0]);
 constexpr int kNumFeatures = kNumBaseFeatures + global_category::kNumGlobalCategoryFeatures;
 
-/** Строковые метаколонки (mcc_code = int64, event_type_nm = float64 — отдельные билдеры). */
+// String join/meta column names 
 static const char* kJoinStringKeyNames[] = {
     "event_descr",
     "currency_iso_cd",
@@ -247,11 +236,9 @@ static std::optional<double> parse_double_any(const std::string& s) {
   return v;
 }
 
-// Наивное локальное время, как pandas / strptime без таймзоны
 static bool parse_dttm_fields(const std::string& s_in, std::tm* out_tm) {
   std::string t = trim_copy(s_in);
   if (t.empty()) return false;
-  // Обрезаем доли секунды (как в Python strptime с .%f)
   if (t.size() > 19 && t[19] == '.') t.resize(19);
   std::memset(out_tm, 0, sizeof(std::tm));
   const char* r = strptime(t.c_str(), "%Y-%m-%d %H:%M:%S", out_tm);
@@ -276,7 +263,6 @@ static void fill_txn_time(Txn& t, const std::string& dttm_s) {
 
 static bool empty_field(const std::string& s) { return trim_copy(s).empty(); }
 
-/** Parquet часто отдаёт dictionary-encoded колонки: схема проверяет тип значений, а в батче id() == DICTIONARY. */
 static std::string col_get_str(const arrow::Array& col, int64_t row) {
   if (col.IsNull(row)) return {};
   if (col.type_id() == arrow::Type::DICTIONARY) {
@@ -344,7 +330,6 @@ static std::string col_get_str(const arrow::Array& col, int64_t row) {
   }
 }
 
-/** Сумма операции: Parquet часто хранит operaton_amt как double; col_get_str для float/double возвращает пусто. */
 static std::optional<double> col_get_optional_double(const arrow::Array& col, int64_t row) {
   if (col.IsNull(row)) return std::nullopt;
   if (col.type_id() == arrow::Type::DICTIONARY) {
@@ -429,7 +414,7 @@ static bool path_is_readable_file(const std::string& p) {
   return f.good();
 }
 
-/** Базовый Arrow-тип: для dictionary — тип значений. */
+// Base Arrow type id (dictionary → value type).
 static arrow::Type::type base_arrow_type_id(const std::shared_ptr<arrow::DataType>& dt) {
   if (dt->id() == arrow::Type::DICTIONARY) {
     return static_cast<const arrow::DictionaryType&>(*dt).value_type()->id();
@@ -438,11 +423,8 @@ static arrow::Type::type base_arrow_type_id(const std::shared_ptr<arrow::DataTyp
 }
 
 enum class ColTypeExpect {
-  /** int32/int64 или строка с числом (event_id, target в labels). */
   kIntKey,
-  /** operaton_amt: число или строка с числом. */
   kAmount,
-  /** Текст и пр.: utf8 / large_utf8 / int как в col_get_str. */
   kText,
 };
 
@@ -469,7 +451,6 @@ struct SchemaColumnSpec {
   ColTypeExpect expect;
 };
 
-// Колонки train/pretrain: обязательные — без них пайплайн не имеет смысла; остальные — если есть, тип должен быть читаем кодом.
 static const SchemaColumnSpec kTrainParquetColumns[] = {
     {"customer_id", true, ColTypeExpect::kText},
     {"event_id", true, ColTypeExpect::kIntKey},
@@ -522,16 +503,16 @@ static arrow::Status validate_parquet_against_specs(const std::string& path, con
     auto f = schema->GetFieldByName(sp.name);
     if (!f) {
       if (sp.required) {
-        std::string msg = std::string(role_tag) + " " + path + ": нет обязательной колонки \"" + sp.name + "\"";
+        std::string msg = std::string(role_tag) + " " + path + ": missing required column \"" + sp.name + "\"";
         return arrow::Status::Invalid(msg);
       }
       continue;
     }
     arrow::Type::type tid = base_arrow_type_id(f->type());
     if (!type_matches_expectation(tid, sp.expect)) {
-      std::string msg = std::string(role_tag) + " " + path + ": колонка \"" + sp.name + "\" имеет тип " +
+      std::string msg = std::string(role_tag) + " " + path + ": column \"" + sp.name + "\" has type " +
                         f->type()->ToString() +
-                        ", ожидается тип, совместимый с чтением в build_dataset (см. ColTypeExpect)";
+                        ", expected a type readable by build_dataset (see ColTypeExpect)";
       return arrow::Status::Invalid(msg);
     }
   }
@@ -542,7 +523,7 @@ static arrow::Status validate_all_input_parquets(const std::string& labels_path,
                                                  const std::vector<std::string>& pre_paths,
                                                  const std::vector<std::string>& train_paths) {
   if (!path_is_readable_file(labels_path)) {
-    return arrow::Status::Invalid("нет или недоступен файл train_labels: " + labels_path);
+    return arrow::Status::Invalid("train_labels file missing or unreadable: " + labels_path);
   }
   int total_steps = 1;
   for (const auto& p : pre_paths)
@@ -616,13 +597,9 @@ static Txn row_to_txn(const arrow::RecordBatch& batch, int64_t i, const arrow::S
 
 struct FeatureRow {
   std::array<double, kNumFeatures> f{};
-  /** MCC как число (сырой код; -2 = missing), для сопоставления с aggregate без хеша. */
   int64_t mcc_code_num = global_category::kMccMissingKey;
-  /** Код типа операции как float (как в сырых parquet), NaN если нет. */
   double event_type_nm_num = std::numeric_limits<double>::quiet_NaN();
-  /** Остальные строковые поля для join / метаданные. */
   std::array<std::string, kNumJoinStrings> join_str{};
-  /** Не признак модели — только метаданные строки датасета. */
   std::string customer_id;
   int64_t event_id = 0;
   int32_t target = 0;
@@ -632,7 +609,6 @@ struct FeatureRow {
 
 static double nan_val() { return std::numeric_limits<double>::quiet_NaN(); }
 
-/** Согласовано с build_global_aggregates (MCC из строки/binary/float). */
 static int64_t mcc_sanitize_int64(int64_t v) {
   if (v == global_category::kMccGlobalKey || v == global_category::kMccMissingKey) return global_category::kMccMissingKey;
   return v;
@@ -1719,6 +1695,9 @@ class GlobalAggregatesLoader {
   std::unordered_map<std::string, std::array<double, 15>> channel;
   std::unordered_map<std::string, std::array<double, 15>> tz;
   std::unordered_map<std::string, std::array<double, 16>> event_curr;
+  std::unordered_map<std::string, std::array<double, 15>> axis_event_descr;
+  std::unordered_map<std::string, std::array<double, 15>> axis_pos_cd;
+  std::unordered_map<std::string, std::array<double, 15>> axis_tz_alone;
 
   std::unordered_map<int64_t, int64_t> mcc_totals_n;
   std::unordered_map<std::string, int64_t> mcc_ch_cnt;
@@ -1757,6 +1736,28 @@ class GlobalAggregatesLoader {
     if (a.empty() && b.empty()) return "__MISSING__";
     if (a == "__GLOBAL__") return "__GLOBAL__";
     return a + "\x1f" + b;
+  }
+
+  static std::string string_axis_key_missing_ds(const std::string& raw) {
+    std::string t = trim_copy(raw);
+    if (t.empty()) return "__MISSING__";
+    return t;
+  }
+  static std::string tz_alone_key_ds(const std::string& tz_raw) {
+    std::string t = trim_copy(tz_raw);
+    if (t.empty()) return "__MISSING_TZ_ALONE__";
+    return t;
+  }
+
+  static std::string axis_key_from_parquet_cell(const std::string& cell, bool is_tz_alone_file) {
+    std::string a = trim_copy(cell);
+    if (a == "__GLOBAL__") return "__GLOBAL__";
+    if (is_tz_alone_file) {
+      if (a.empty() || a == "__MISSING_TZ_ALONE__") return "__MISSING_TZ_ALONE__";
+      return a;
+    }
+    if (a.empty() || a == "__MISSING__") return "__MISSING__";
+    return a;
   }
 
   static double neglog_smooth_count(int64_t num, int64_t den) {
@@ -1813,6 +1814,24 @@ class GlobalAggregatesLoader {
     if (it != event_curr.end()) return &it->second;
     it = event_curr.find("__GLOBAL__");
     return it != event_curr.end() ? &it->second : nullptr;
+  }
+  const std::array<double, 15>* axis_ed_ptr(const std::string& k) const {
+    auto it = axis_event_descr.find(k);
+    if (it != axis_event_descr.end()) return &it->second;
+    it = axis_event_descr.find("__GLOBAL__");
+    return it != axis_event_descr.end() ? &it->second : nullptr;
+  }
+  const std::array<double, 15>* axis_pos_ptr(const std::string& k) const {
+    auto it = axis_pos_cd.find(k);
+    if (it != axis_pos_cd.end()) return &it->second;
+    it = axis_pos_cd.find("__GLOBAL__");
+    return it != axis_pos_cd.end() ? &it->second : nullptr;
+  }
+  const std::array<double, 15>* axis_tz_alone_ptr(const std::string& k) const {
+    auto it = axis_tz_alone.find(k);
+    if (it != axis_tz_alone.end()) return &it->second;
+    it = axis_tz_alone.find("__GLOBAL__");
+    return it != axis_tz_alone.end() ? &it->second : nullptr;
   }
 
   static void put_block_mcc(double amount, const std::array<double, 15>* s, double* d20) {
@@ -1953,6 +1972,19 @@ class GlobalAggregatesLoader {
     put_block_ev(amount, ev_ptr(et_curr_key_ds(etn, et_ok, cur)), &r->f[static_cast<size_t>(off)]);
     off += 22;
     put_joint_features(&r->f[static_cast<size_t>(off)], mcc_k, ch_t, ch_s, cur, tz_raw);
+    off += 5;
+
+    std::string ed_raw = get_s("event_descr");
+    if (ed_raw.empty()) ed_raw = get_s("event_desc");
+    const std::string ed_k = string_axis_key_missing_ds(ed_raw);
+    const std::string pos_k = string_axis_key_missing_ds(get_s("pos_cd"));
+    const std::string tz_ak = tz_alone_key_ds(tz_raw);
+
+    put_block_channel(amount, axis_ed_ptr(ed_k), &r->f[static_cast<size_t>(off)]);
+    off += 20;
+    put_block_channel(amount, axis_pos_ptr(pos_k), &r->f[static_cast<size_t>(off)]);
+    off += 20;
+    put_block_channel(amount, axis_tz_alone_ptr(tz_ak), &r->f[static_cast<size_t>(off)]);
   }
 
   arrow::Status load_from_dir(const std::string& dir) {
@@ -1961,6 +1993,9 @@ class GlobalAggregatesLoader {
     channel.clear();
     tz.clear();
     event_curr.clear();
+    axis_event_descr.clear();
+    axis_pos_cd.clear();
+    axis_tz_alone.clear();
     mcc_totals_n.clear();
     mcc_ch_cnt.clear();
     mcc_cur_cnt.clear();
@@ -1985,6 +2020,9 @@ class GlobalAggregatesLoader {
     std::string p_mtzj = dir + "/mcc_tz_joint.parquet";
     std::string p_top3 = dir + "/channel_mcc_top3.parquet";
     std::string p_pair = dir + "/channel_mcc_pair.parquet";
+    std::string p_ed = dir + "/event_descr.parquet";
+    std::string p_pos = dir + "/pos_cd.parquet";
+    std::string p_tza = dir + "/timezone_alone.parquet";
 
     ARROW_RETURN_NOT_OK(require_file(p_mcc));
     ARROW_RETURN_NOT_OK(require_file(p_ch));
@@ -1996,6 +2034,9 @@ class GlobalAggregatesLoader {
     ARROW_RETURN_NOT_OK(require_file(p_mtzj));
     ARROW_RETURN_NOT_OK(require_file(p_top3));
     ARROW_RETURN_NOT_OK(require_file(p_pair));
+    ARROW_RETURN_NOT_OK(require_file(p_ed));
+    ARROW_RETURN_NOT_OK(require_file(p_pos));
+    ARROW_RETURN_NOT_OK(require_file(p_tza));
 
     arrow::MemoryPool* pool = arrow::default_memory_pool();
 
@@ -2160,6 +2201,115 @@ class GlobalAggregatesLoader {
             row[static_cast<size_t>(c)] = dv.has_value() && std::isfinite(*dv) ? *dv : nan_val();
           }
           if (ok) event_curr[key] = row;
+        }
+      }
+      return arrow::Status::OK();
+    };
+
+    auto read_axis_event_descr = [&]() -> arrow::Status {
+      ARROW_ASSIGN_OR_RAISE(auto infile, arrow::io::ReadableFile::Open(p_ed));
+      ARROW_ASSIGN_OR_RAISE(auto reader, parquet::arrow::OpenFile(infile, pool));
+      ARROW_ASSIGN_OR_RAISE(auto rb_it, reader->GetRecordBatchReader());
+      while (true) {
+        ARROW_ASSIGN_OR_RAISE(auto b, rb_it->Next());
+        if (!b) break;
+        auto sch = b->schema();
+        int jk = sch->GetFieldIndex("event_descr");
+        if (jk < 0) continue;
+        const auto& ck = *b->column(jk);
+        int64_t nr = b->num_rows();
+        const char* names[] = {
+            "global_mean_amount_event_descr",     "global_std_amount_event_descr", "global_median_amount_event_descr",
+            "global_q25_event_descr",             "global_q75_event_descr",        "global_q95_event_descr",
+            "global_cnt_event_descr",             "global_cv_event_descr",         "fraud_rate_event_descr",
+            "fraud_count_event_descr",            "train_total_count_event_descr", "woe_event_descr",
+            "global_cnt_clean_event_descr",       "global_q90_event_descr",        "global_q99_event_descr"};
+        for (int64_t r = 0; r < nr; ++r) {
+          std::string key = axis_key_from_parquet_cell(col_get_str(ck, r), false);
+          std::array<double, 15> row{};
+          bool ok = true;
+          for (int c = 0; c < 15; ++c) {
+            int ji = sch->GetFieldIndex(names[c]);
+            if (ji < 0) {
+              ok = false;
+              break;
+            }
+            auto dv = col_get_optional_double(*b->column(ji), r);
+            row[static_cast<size_t>(c)] = dv.has_value() && std::isfinite(*dv) ? *dv : nan_val();
+          }
+          if (ok) axis_event_descr[key] = row;
+        }
+      }
+      return arrow::Status::OK();
+    };
+    auto read_axis_pos_cd = [&]() -> arrow::Status {
+      ARROW_ASSIGN_OR_RAISE(auto infile, arrow::io::ReadableFile::Open(p_pos));
+      ARROW_ASSIGN_OR_RAISE(auto reader, parquet::arrow::OpenFile(infile, pool));
+      ARROW_ASSIGN_OR_RAISE(auto rb_it, reader->GetRecordBatchReader());
+      while (true) {
+        ARROW_ASSIGN_OR_RAISE(auto b, rb_it->Next());
+        if (!b) break;
+        auto sch = b->schema();
+        int jk = sch->GetFieldIndex("pos_cd");
+        if (jk < 0) continue;
+        const auto& ck = *b->column(jk);
+        int64_t nr = b->num_rows();
+        const char* names[] = {
+            "global_mean_amount_pos_cd",     "global_std_amount_pos_cd", "global_median_amount_pos_cd",
+            "global_q25_pos_cd",             "global_q75_pos_cd",        "global_q95_pos_cd",
+            "global_cnt_pos_cd",             "global_cv_pos_cd",         "fraud_rate_pos_cd",
+            "fraud_count_pos_cd",            "train_total_count_pos_cd", "woe_pos_cd",
+            "global_cnt_clean_pos_cd",       "global_q90_pos_cd",        "global_q99_pos_cd"};
+        for (int64_t r = 0; r < nr; ++r) {
+          std::string key = axis_key_from_parquet_cell(col_get_str(ck, r), false);
+          std::array<double, 15> row{};
+          bool ok = true;
+          for (int c = 0; c < 15; ++c) {
+            int ji = sch->GetFieldIndex(names[c]);
+            if (ji < 0) {
+              ok = false;
+              break;
+            }
+            auto dv = col_get_optional_double(*b->column(ji), r);
+            row[static_cast<size_t>(c)] = dv.has_value() && std::isfinite(*dv) ? *dv : nan_val();
+          }
+          if (ok) axis_pos_cd[key] = row;
+        }
+      }
+      return arrow::Status::OK();
+    };
+    auto read_axis_tz_alone = [&]() -> arrow::Status {
+      ARROW_ASSIGN_OR_RAISE(auto infile, arrow::io::ReadableFile::Open(p_tza));
+      ARROW_ASSIGN_OR_RAISE(auto reader, parquet::arrow::OpenFile(infile, pool));
+      ARROW_ASSIGN_OR_RAISE(auto rb_it, reader->GetRecordBatchReader());
+      while (true) {
+        ARROW_ASSIGN_OR_RAISE(auto b, rb_it->Next());
+        if (!b) break;
+        auto sch = b->schema();
+        int jk = sch->GetFieldIndex("timezone");
+        if (jk < 0) continue;
+        const auto& ck = *b->column(jk);
+        int64_t nr = b->num_rows();
+        const char* names[] = {
+            "global_mean_amount_tz_alone",     "global_std_amount_tz_alone", "global_median_amount_tz_alone",
+            "global_q25_tz_alone",             "global_q75_tz_alone",        "global_q95_tz_alone",
+            "global_cnt_tz_alone",             "global_cv_tz_alone",         "fraud_rate_tz_alone",
+            "fraud_count_tz_alone",            "train_total_count_tz_alone", "woe_tz_alone",
+            "global_cnt_clean_tz_alone",       "global_q90_tz_alone",        "global_q99_tz_alone"};
+        for (int64_t r = 0; r < nr; ++r) {
+          std::string key = axis_key_from_parquet_cell(col_get_str(ck, r), true);
+          std::array<double, 15> row{};
+          bool ok = true;
+          for (int c = 0; c < 15; ++c) {
+            int ji = sch->GetFieldIndex(names[c]);
+            if (ji < 0) {
+              ok = false;
+              break;
+            }
+            auto dv = col_get_optional_double(*b->column(ji), r);
+            row[static_cast<size_t>(c)] = dv.has_value() && std::isfinite(*dv) ? *dv : nan_val();
+          }
+          if (ok) axis_tz_alone[key] = row;
         }
       }
       return arrow::Status::OK();
@@ -2335,7 +2485,7 @@ class GlobalAggregatesLoader {
       return arrow::Status::OK();
     };
 
-    constexpr int k_agg_load_steps = 10;
+    constexpr int k_agg_load_steps = 13;
     int agg_step = 0;
     auto agg_phase = [&](const char* name) {
       ++agg_step;
@@ -2363,9 +2513,16 @@ class GlobalAggregatesLoader {
     agg_phase("channel_mcc_top3.parquet");
     ARROW_RETURN_NOT_OK(read_ch_mcc_pair());
     agg_phase("channel_mcc_pair.parquet");
+    ARROW_RETURN_NOT_OK(read_axis_event_descr());
+    agg_phase("event_descr.parquet");
+    ARROW_RETURN_NOT_OK(read_axis_pos_cd());
+    agg_phase("pos_cd.parquet");
+    ARROW_RETURN_NOT_OK(read_axis_tz_alone());
+    agg_phase("timezone_alone.parquet");
     ds_progress::finish_progress_line();
 
-    if (mcc.empty() || channel.empty() || tz.empty() || event_curr.empty()) {
+    if (mcc.empty() || channel.empty() || tz.empty() || event_curr.empty() || axis_event_descr.empty() ||
+        axis_pos_cd.empty() || axis_tz_alone.empty()) {
       return arrow::Status::Invalid("global aggregates: empty main maps after reading ", dir);
     }
     if (mcc.find(global_category::kMccGlobalKey) == mcc.end()) {
@@ -2543,7 +2700,7 @@ static arrow::Result<WindowTargetSampler> build_sampler_from_pretest(const std::
 
   std::unordered_map<std::string, int64_t> user_counts;
   int64_t rows_seen = 0;
-  const std::string pre_tag = ds_progress::path_basename(pretest_path) + " [pretest→sampler]";
+  const std::string pre_tag = ds_progress::path_basename(pretest_path) + " [pretest->sampler]";
   while (true) {
     ARROW_ASSIGN_OR_RAISE(auto batch_ptr, rb->Next());
     if (!batch_ptr) break;
@@ -2619,7 +2776,7 @@ static arrow::Status process_file(const std::string& path, bool is_train,
   ARROW_ASSIGN_OR_RAISE(auto rb, reader->GetRecordBatchReader());
   int64_t rows_seen = 0;
   while (true) {
-    // Parquet не реализует ReadNext() без аргументов (RecordBatchWithMetadata) — используем Next().
+    // Parquet reader: no no-arg ReadNext() (RecordBatchWithMetadata); use Next().
     ARROW_ASSIGN_OR_RAISE(auto batch_ptr, rb->Next());
     if (!batch_ptr) break;
     const arrow::RecordBatch& batch = *batch_ptr;
@@ -2666,7 +2823,7 @@ int main(int argc, char** argv) {
   std::string data_test = root + "/data/test/";
   std::string labels_path = root + "/data/train_labels.parquet";
   std::string pretest_path = data_test + "pretest.parquet";
-  std::string out_dir = root + "/output/";
+  std::string out_dir = root + "/output/datasets/train/";
   std::string out_path = out_dir + "full_dataset.parquet";
 
   log_msg("repo_root=" + root + " out_path=" + out_path);
@@ -2674,7 +2831,7 @@ int main(int argc, char** argv) {
   std::error_code fs_ec;
   std::filesystem::create_directories(out_dir, fs_ec);
   if (fs_ec) {
-    std::cerr << "[build_dataset] Cannot create directory: " << out_dir << " — " << fs_ec.message() << "\n";
+    std::cerr << "[build_dataset] Cannot create directory: " << out_dir << " - " << fs_ec.message() << "\n";
     return 1;
   }
 
@@ -2687,10 +2844,10 @@ int main(int argc, char** argv) {
   {
     arrow::Status vst = validate_all_input_parquets(labels_path, pre, tr);
     if (!vst.ok()) {
-      std::cerr << "[build_dataset] Проверка схем parquet: ОШИБКА — " << vst.ToString() << "\n";
+      std::cerr << "[build_dataset] Parquet schema validation FAILED: " << vst.ToString() << "\n";
       return 1;
     }
-    log_msg("проверка схем parquet (labels + существующие pretrain/train): OK");
+    log_msg("parquet schema check (labels + existing pretrain/train): OK");
   }
 
   if (!load_labels(labels_path, &labels_orig).ok()) {
@@ -2708,7 +2865,7 @@ int main(int argc, char** argv) {
 
   GlobalAggregatesLoader global_agg;
   {
-    std::string gdir = out_dir + "global_aggregates";
+    std::string gdir = root + "/output/datasets/global_aggregates";
     arrow::Status gst = global_agg.load_from_dir(gdir);
     if (!gst.ok()) {
       std::cerr << "[build_dataset] global aggregates load: " << gst.ToString() << "\n";
@@ -2719,7 +2876,7 @@ int main(int argc, char** argv) {
   DatasetWriter wr(out_path);
   std::unordered_map<std::string, UserWindow> windows;
 
-  log_msg("phase: for each k=1..3: pretrain_part_k (window only) → train_part_k (dataset) → evict cohort");
+  log_msg("phase: for each k=1..3: pretrain_part_k (window only) -> train_part_k (dataset) -> evict cohort");
   for (int part = 0; part < 3; ++part) {
     std::unordered_set<std::string> cohort_ids;
     cohort_ids.reserve(65536);

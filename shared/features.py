@@ -1,5 +1,3 @@
-"""Имена и расчёт фич — по dataset_cpp_module_spec.txt и shared/parquet_batch_aggregates."""
-
 from __future__ import annotations
 
 import logging
@@ -128,7 +126,7 @@ FEATURE_NAMES: list[str] = list(_BASE_LOCAL_FEATURE_NAMES) + list(_GLOBAL_CATEGO
 
 
 def _parse_event_type_nm(v: Any) -> float:
-    """Код/число из колонки event_type_nm как float; иначе NaN (без хеширования)."""
+    # event_type_nm → float or NaN
     if v is None:
         return float("nan")
     if isinstance(v, bool):
@@ -205,13 +203,8 @@ def compute_features(
     row: Mapping[str, Any],
     tr_amount: float | None = None,
 ) -> dict[str, float]:
-    """
-    Фичи по окну до текущей строки (текущая строка ещё не в окне).
-    tr_amount — число транзакций в окне; по умолчанию len(agg).
-    Для tr_amount и log_1_plus_transactions_seen: если у agg.window_transaction_cap задан лимит,
-    значения режутся по нему; если None (инференс без лимита) — используется полный размер окна.
-    """
-    window: list[WindowTxn] = list(agg._window)  # noqa: SLF001 — осознанный доступ к окну
+    # Features from window before current row; tr_amount defaults to len(agg._window)
+    window: list[WindowTxn] = list(agg._window)  # noqa: SLF001 - intentional read of internal window deque
     if tr_amount is None:
         tr_amount = float(len(window))
 

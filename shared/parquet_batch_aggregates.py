@@ -1,9 +1,3 @@
-"""
-Оконные агрегаты по клиенту для чтения parquet побатчево.
-Семантика совпадает с dataset_cpp_module_spec.txt: окно из последних N транзакций,
-обновление после расчёта фич для train/test.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -23,7 +17,7 @@ logger = logging.getLogger(__name__)
 CUSTOMER_ID_COLUMN = "customer_id"
 EVENT_ID_COLUMN = "event_id"
 
-# Колонки для чтения из parquet (минимальный набор + опциональные имена)
+# Columns to read from parquet (minimal set + optional names)
 FEATURE_COLUMNS = [
     "customer_id",
     "event_id",
@@ -133,8 +127,6 @@ def row_to_window_txn(row: Mapping[str, Any]) -> WindowTxn:
 
 
 class UserAggregates:
-    """Скользящее окно транзакций одного клиента."""
-
     __slots__ = ("_window", "_max_len")
 
     def __init__(self, max_len: int | None = None, *, unlimited: bool = False) -> None:
@@ -148,7 +140,6 @@ class UserAggregates:
 
     @property
     def window_transaction_cap(self) -> int | None:
-        """Максимум транзакций в deque; None — без ограничения (весь pretest+история до текущей строки)."""
         return self._max_len
 
     def __len__(self) -> int:
@@ -178,7 +169,7 @@ def _parquet_total_rows(paths: list[Any]) -> int:
         try:
             total += int(pq.ParquetFile(path).metadata.num_rows)
         except (OSError, ValueError, AttributeError, TypeError) as e:
-            logger.debug("Не удалось прочитать num_rows для %s: %s", path, e)
+            logger.debug("Could not read num_rows for %s: %s", path, e)
     return total
 
 
@@ -205,12 +196,12 @@ def _iter_parquet_rows_impl(
 ) -> Iterator[dict[str, Any]]:
     for path in paths:
         if not path.exists():
-            logger.warning("Файл parquet отсутствует, пропуск: %s", path)
+            logger.warning("Parquet file missing, skip: %s", path)
             continue
         use_cols = _existing_columns(path, cols_base)
         if CUSTOMER_ID_COLUMN not in use_cols:
             use_cols = [CUSTOMER_ID_COLUMN] + use_cols
-        logger.info("Чтение parquet: %s (колонок: %d)", path, len(use_cols))
+        logger.info("Reading parquet: %s (columns: %d)", path, len(use_cols))
         pf = pq.ParquetFile(path)
         for batch in pf.iter_batches(columns=use_cols, batch_size=batch_size):
             names = batch.schema.names
@@ -227,10 +218,10 @@ def build_windowed_aggregates(
     *,
     unlimited_window: bool = False,
 ) -> dict[Any, UserAggregates]:
-    """Проходит файлы по порядку, наполняет оконные агрегаты (только update, без фич)."""
+    # Scan paths and fill per-customer aggregates (update only)
     aggregates: dict[Any, UserAggregates] = {}
     logger.info(
-        "Оконные агрегаты: файлов=%d, batch_size=%d, unlimited_window=%s",
+        "Windowed aggregates: files=%d, batch_size=%d, unlimited_window=%s",
         len(paths),
         batch_size,
         unlimited_window,
@@ -250,7 +241,7 @@ def build_windowed_aggregates(
         if cid not in aggregates:
             aggregates[cid] = UserAggregates(unlimited=unlimited_window)
         aggregates[cid].update(row)
-    logger.info("Оконные агрегаты: уникальных customer_id=%d", len(aggregates))
+    logger.info("Windowed aggregates: unique customer_id=%d", len(aggregates))
     return aggregates
 
 
@@ -261,7 +252,6 @@ def build_user_aggregates(
     *,
     unlimited_window: bool = False,
 ) -> dict[Any, UserAggregates]:
-    """Алиас для скриптов: то же, что build_windowed_aggregates."""
     return build_windowed_aggregates(
         paths,
         batch_size=batch_size,

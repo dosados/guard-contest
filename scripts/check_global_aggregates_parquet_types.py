@@ -1,25 +1,6 @@
 #!/usr/bin/env python3
-"""
-Типы колонок в тренировочных parquet и в output/global_aggregates/*.parquet.
-
-Источники: data/train/*.parquet, data/train_labels.parquet (схема + кратко mcc_code).
-Агрегаты: полная схема + по каждой колонке тип/nulls/min/max (файлы обычно невелики).
-
-Запуск из корня репозитория:
-  conda activate guard-contest
-  PYTHONPATH=. python3 scripts/check_global_aggregates_parquet_types.py
-
-Опции:
-  --train-dir data/train
-  --labels data/train_labels.parquet
-  --dir output/global_aggregates
-  --aggregates-light   агрегаты: схема + только mcc/cnt/n_rows (быстрее)
-  --aggregates-schema-only   только схема для агрегатов
-"""
-
 from __future__ import annotations
 
-import argparse
 import sys
 from pathlib import Path
 
@@ -30,6 +11,8 @@ import pyarrow.parquet as pq
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
+
+from shared.config import GLOBAL_CATEGORY_AGGREGATES_DIR
 
 MCC_GLOBAL_KEY = -(2**63)
 MCC_MISSING_KEY = -2
@@ -63,9 +46,9 @@ def _print_schema_compact(path: Path) -> None:
 def _summarize_one_column(path: Path, colname: str) -> None:
     schema = pq.read_schema(path)
     if colname not in schema.names:
-        print(f"  (нет колонки {colname!r})")
+        print(f"  (no column {colname!r})")
         return
-    print(f"  --- колонка {colname!r} ---")
+    print(f"  --- column {colname!r} ---")
     try:
         table = pq.read_table(path, columns=[colname], memory_map=True)
     except Exception as e:
@@ -84,7 +67,7 @@ def _summarize_one_column(path: Path, colname: str) -> None:
     print(f"  rows: {n}  nulls: {nulls}")
     mask = pc.is_valid(arr)
     if not pc.any(mask).as_py():
-        print("  (все null)")
+        print("  (all null)")
         return
     v = pc.filter(arr, mask)
     if pa.types.is_integer(t) or pa.types.is_floating(t):
@@ -131,7 +114,7 @@ def _summarize_column(path: Path, name: str, arr: pa.ChunkedArray) -> None:
         mn_v, mx_v = mn.as_py(), mx.as_py()
         if mn_v is not None and mx_v is not None and pa.types.is_integer(t):
             if mn_v < -10_000_000 or mx_v > 10_000_000:
-                print("    *** подозрительный диапазон ***")
+                print("    *** suspicious numeric range ***")
         return
 
     if pa.types.is_string(t) or pa.types.is_large_string(t):
@@ -145,7 +128,7 @@ def _summarize_column(path: Path, name: str, arr: pa.ChunkedArray) -> None:
             )
         return
 
-    print(f"    (нет числовой сводки для типа {t})")
+    print(f"    (no numeric summary for type {t})")
 
 
 def _inspect_file_all_columns(path: Path, *, max_string_uniques: int = 12) -> None:
@@ -187,14 +170,14 @@ def _inspect_file_all_columns(path: Path, *, max_string_uniques: int = 12) -> No
 
 
 def _mcc_type_from_schema(path: Path) -> None:
-    """Только объявленный в parquet тип mcc_code (без чтения всех строк)."""
+    # mcc_code type from parquet schema only
     sch = pq.read_schema(path)
     if "mcc_code" not in sch.names:
-        print("  mcc_code: (колонки нет в схеме)")
+        print("  mcc_code: (column missing from schema)")
         return
     f = sch.field("mcc_code")
-    print(f"  mcc_code (тип в схеме parquet): {_arrow_type_str(f.type)}  nullable={f.nullable}")
-    # Статистика parquet по первым row groups (если есть)
+    print(f"  mcc_code (parquet schema type): {_arrow_type_str(f.type)}  nullable={f.nullable}")
+    # Parquet stats from first row groups when present
     pf = pq.ParquetFile(path)
     idx = sch.get_field_index("mcc_code")
     st_txt: list[str] = []
@@ -207,54 +190,54 @@ def _mcc_type_from_schema(path: Path) -> None:
             except Exception:
                 st_txt.append(f"rg{rg}[?]")
     if st_txt:
-        print(f"  parquet min/max (до 3 RG): {'; '.join(st_txt)}")
+        print(f"  parquet min/max (up to 3 RG): {'; '.join(st_txt)}")
 
 
 def _scan_training_sources(train_dir: Path, labels_path: Path, *, train_mcc_full_stats: bool) -> None:
     print("\n" + "#" * 80)
-    print("# ИСТОЧНИКИ: data/train/*.parquet")
+    print("# SOURCES: data/train/*.parquet")
     print("#" * 80)
     if not train_dir.is_dir():
-        print(f"Нет каталога: {train_dir}", file=sys.stderr)
+        print(f"Directory missing: {train_dir}", file=sys.stderr)
     else:
         for p in sorted(train_dir.glob("*.parquet")):
             _print_schema_compact(p)
             print("  mcc_code:")
             _mcc_type_from_schema(p)
             if train_mcc_full_stats:
-                print("  (полное чтение колонки mcc_code — может быть долго)")
+                print("  (full read of mcc_code column - may be slow)")
                 _summarize_one_column(p, "mcc_code")
             sch = pq.read_schema(p)
             if "event_type_nm" in sch.names:
-                print("  event_type_nm (тип в схеме):", _arrow_type_str(sch.field("event_type_nm").type))
+                print("  event_type_nm (schema type):", _arrow_type_str(sch.field("event_type_nm").type))
                 if train_mcc_full_stats:
                     _summarize_one_column(p, "event_type_nm")
 
     print("\n" + "#" * 80)
-    print("# ИСТОЧНИК: train_labels.parquet")
+    print("# SOURCE: train_labels.parquet")
     print("#" * 80)
     if not labels_path.is_file():
-        print(f"Нет файла: {labels_path}", file=sys.stderr)
+        print(f"File missing: {labels_path}", file=sys.stderr)
     else:
         _print_schema_compact(labels_path)
         for c in ("event_id", "target"):
             sch = pq.read_schema(labels_path)
             if c in sch.names:
-                print(f"  {c} (тип в схеме): {_arrow_type_str(sch.field(c).type)}")
+                print(f"  {c} (schema type): {_arrow_type_str(sch.field(c).type)}")
                 if train_mcc_full_stats or labels_path.stat().st_size < 50_000_000:
                     _summarize_one_column(labels_path, c)
 
 
 def _scan_aggregates(agg_dir: Path, *, mode: str) -> None:
     print("\n" + "#" * 80)
-    print("# РЕЗУЛЬТАТ: output/global_aggregates/*.parquet")
+    print("# OUTPUT: output/datasets/global_aggregates/*.parquet")
     print("#" * 80)
     if not agg_dir.is_dir():
-        print(f"Нет каталога: {agg_dir}", file=sys.stderr)
+        print(f"Directory missing: {agg_dir}", file=sys.stderr)
         return
     paths = sorted(agg_dir.glob("*.parquet"))
     if not paths:
-        print(f"Нет *.parquet в {agg_dir}", file=sys.stderr)
+        print(f"No *.parquet in {agg_dir}", file=sys.stderr)
         return
     for p in paths:
         _print_schema_compact(p)
@@ -270,48 +253,34 @@ def _scan_aggregates(agg_dir: Path, *, mode: str) -> None:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Типы колонок: train vs global_aggregates.")
-    ap.add_argument("--train-dir", type=Path, default=_PROJECT_ROOT / "data" / "train")
-    ap.add_argument("--labels", type=Path, default=_PROJECT_ROOT / "data" / "train_labels.parquet")
-    ap.add_argument("--dir", type=Path, default=_PROJECT_ROOT / "output" / "global_aggregates")
-    ap.add_argument(
-        "--aggregates-light",
-        action="store_true",
-        help="Агрегаты: схема + только mcc/cnt/n_rows/top*_mcc (быстрее)",
-    )
-    ap.add_argument(
-        "--aggregates-schema-only",
-        action="store_true",
-        help="Для агрегатов только схема",
-    )
-    ap.add_argument("--no-train", action="store_true", help="Не сканировать train/labels")
-    ap.add_argument("--no-aggregates", action="store_true", help="Не сканировать global_aggregates")
-    ap.add_argument(
-        "--train-mcc-full-stats",
-        action="store_true",
-        help="Читать целиком mcc_code/event_type_nm по train (долго на больших parquet)",
-    )
-    args = ap.parse_args()
+    train_dir = _PROJECT_ROOT / "data" / "train"
+    labels = _PROJECT_ROOT / "data" / "train_labels.parquet"
+    aggregates_dir = GLOBAL_CATEGORY_AGGREGATES_DIR
+    aggregates_schema_only = False
+    aggregates_light = False
+    no_train = False
+    no_aggregates = False
+    train_mcc_full_stats = False
 
-    if args.aggregates_schema_only:
+    if aggregates_schema_only:
         agg_mode = "schema"
-    elif args.aggregates_light:
+    elif aggregates_light:
         agg_mode = "light"
     else:
         agg_mode = "full"
 
-    if not args.no_train:
+    if not no_train:
         _scan_training_sources(
-            args.train_dir.resolve(),
-            args.labels.resolve(),
-            train_mcc_full_stats=args.train_mcc_full_stats,
+            train_dir.resolve(),
+            labels.resolve(),
+            train_mcc_full_stats=train_mcc_full_stats,
         )
-    if not args.no_aggregates:
-        _scan_aggregates(args.dir.resolve(), mode=agg_mode)
+    if not no_aggregates:
+        _scan_aggregates(aggregates_dir.resolve(), mode=agg_mode)
 
-    print("\nПодсказка: если в train mcc_code имеет тип INT64/FLOAT, а build_global_aggregates берёт его через "
-          "col_get_str(), парсинг MCC может давать пустую строку → во joint везде -2 (MCC_MISSING_KEY).\n")
-    print("Готово.")
+    print("\nHint: if train mcc_code is INT64/FLOAT but build_global_aggregates reads it via "
+          "col_get_str(), MCC parsing may yield empty strings -> joins use -2 (MCC_MISSING_KEY) everywhere.\n")
+    print("Done.")
 
 
 if __name__ == "__main__":

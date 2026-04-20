@@ -1,7 +1,4 @@
-// Двухфазное построение популяционных агрегатов (pretrain → train по п.6 спеки) и запись в Parquet.
-// Запуск из корня: ./build_global_aggregates [repo_root]
-// Выход: output/global_aggregates/{mcc,channel_subtype,timezone_currency,event_type_nm}.parquet
-//        + population_meta.parquet (одна строка: счётчики для WOE / частот).
+// Global category aggregates → output/datasets/global_aggregates/*.parquet (+ population_meta).
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -353,7 +350,7 @@ static int64_t parse_mcc_key(const std::string& raw) {
   return global_category::kMccMissingKey;
 }
 
-/** MCC из ячейки Arrow: целые, строка, binary, float (без жесткого stoll на всю строку). */
+// MCC from Arrow cell (int/string/binary/float).
 static int64_t parse_mcc_from_column(const arrow::Array& col, int64_t row) {
   if (col.IsNull(row)) return global_category::kMccMissingKey;
   if (col.type_id() == arrow::Type::DICTIONARY) {
@@ -781,11 +778,105 @@ static arrow::Status write_event_type_parquet(const std::string& path, const std
   return arrow::Status::OK();
 }
 
+// Empty string → __MISSING__ axis key.
+static std::string string_axis_key_missing(const std::string& raw) {
+  std::string t = trim_copy(raw);
+  if (t.empty()) return "__MISSING__";
+  return t;
+}
+
+// Timezone-only aggregate key.
+static std::string tz_alone_key(const std::string& tz_raw) {
+  std::string t = trim_copy(tz_raw);
+  if (t.empty()) return "__MISSING_TZ_ALONE__";
+  return t;
+}
+
+// Single utf8 key column + 15 stat columns.
+static arrow::Status write_string_axis_15stats(const std::string& path,
+                                                const std::unordered_map<std::string, AxisState>& m,
+                                                double odds_pop, const char* key_col_name,
+                                                const std::string& stat_suffix) {
+  std::vector<std::string> keys;
+  keys.reserve(m.size());
+  for (const auto& kv : m) keys.push_back(kv.first);
+  std::sort(keys.begin(), keys.end());
+
+  arrow::StringBuilder k_b;
+  std::vector<arrow::DoubleBuilder> bs(15);
+  for (const std::string& k : keys) {
+    const auto& st = m.at(k);
+    FinalizedAxis f = finalize_axis(st, odds_pop);
+    std::string cell = k;
+    if (k == "__GLOBAL__") {
+      cell = "__GLOBAL__";
+    } else if (stat_suffix == "tz_alone" && k == "__MISSING_TZ_ALONE__") {
+      cell = "__MISSING_TZ_ALONE__";
+    } else if (k == "__MISSING__") {
+      cell = "__MISSING__";
+    }
+    ARROW_RETURN_NOT_OK(k_b.Append(cell));
+    ARROW_RETURN_NOT_OK(bs[0].Append(f.mean));
+    ARROW_RETURN_NOT_OK(bs[1].Append(f.stdv));
+    ARROW_RETURN_NOT_OK(bs[2].Append(f.median));
+    ARROW_RETURN_NOT_OK(bs[3].Append(f.q25));
+    ARROW_RETURN_NOT_OK(bs[4].Append(f.q75));
+    ARROW_RETURN_NOT_OK(bs[5].Append(f.q95));
+    ARROW_RETURN_NOT_OK(bs[6].Append(f.cnt));
+    ARROW_RETURN_NOT_OK(bs[7].Append(f.cv));
+    ARROW_RETURN_NOT_OK(bs[8].Append(f.fraud_rate));
+    ARROW_RETURN_NOT_OK(bs[9].Append(f.fraud_count));
+    ARROW_RETURN_NOT_OK(bs[10].Append(f.train_total));
+    ARROW_RETURN_NOT_OK(bs[11].Append(f.woe));
+    ARROW_RETURN_NOT_OK(bs[12].Append(f.cnt_clean));
+    ARROW_RETURN_NOT_OK(bs[13].Append(f.q90));
+    ARROW_RETURN_NOT_OK(bs[14].Append(f.q99));
+  }
+  std::shared_ptr<arrow::Array> ak;
+  ARROW_RETURN_NOT_OK(k_b.Finish(&ak));
+  std::vector<std::shared_ptr<arrow::Array>> arrs = {ak};
+  for (int j = 0; j < 15; ++j) {
+    std::shared_ptr<arrow::Array> aj;
+    ARROW_RETURN_NOT_OK(bs[j].Finish(&aj));
+    arrs.push_back(aj);
+  }
+  const std::string sfx = stat_suffix;
+  auto schema = arrow::schema({
+      arrow::field(key_col_name, arrow::utf8()),
+      arrow::field("global_mean_amount_" + sfx, arrow::float64()),
+      arrow::field("global_std_amount_" + sfx, arrow::float64()),
+      arrow::field("global_median_amount_" + sfx, arrow::float64()),
+      arrow::field("global_q25_" + sfx, arrow::float64()),
+      arrow::field("global_q75_" + sfx, arrow::float64()),
+      arrow::field("global_q95_" + sfx, arrow::float64()),
+      arrow::field("global_cnt_" + sfx, arrow::float64()),
+      arrow::field("global_cv_" + sfx, arrow::float64()),
+      arrow::field("fraud_rate_" + sfx, arrow::float64()),
+      arrow::field("fraud_count_" + sfx, arrow::float64()),
+      arrow::field("train_total_count_" + sfx, arrow::float64()),
+      arrow::field("woe_" + sfx, arrow::float64()),
+      arrow::field("global_cnt_clean_" + sfx, arrow::float64()),
+      arrow::field("global_q90_" + sfx, arrow::float64()),
+      arrow::field("global_q99_" + sfx, arrow::float64()),
+  });
+  auto table = arrow::Table::Make(schema, arrs);
+  ARROW_ASSIGN_OR_RAISE(auto out, arrow::io::FileOutputStream::Open(path));
+  parquet::WriterProperties::Builder pb;
+  ARROW_ASSIGN_OR_RAISE(auto writer, parquet::arrow::FileWriter::Open(*schema, arrow::default_memory_pool(), out, pb.build()));
+  ARROW_RETURN_NOT_OK(writer->WriteTable(*table, table->num_rows()));
+  ARROW_RETURN_NOT_OK(writer->Close());
+  ARROW_RETURN_NOT_OK(out->Close());
+  return arrow::Status::OK();
+}
+
 struct AllMaps {
   std::unordered_map<int64_t, AxisState> mcc;
   std::unordered_map<std::string, AxisState> channel;
   std::unordered_map<std::string, AxisState> tz_curr;
   std::unordered_map<std::string, AxisState> event_curr;
+  std::unordered_map<std::string, AxisState> event_descr_ax;
+  std::unordered_map<std::string, AxisState> pos_cd_ax;
+  std::unordered_map<std::string, AxisState> tz_alone_ax;
   PopTotals pop;
   std::unordered_map<int64_t, int64_t> mcc_total_rows;
   std::unordered_map<std::string, int64_t> mcc_ch_joint;
@@ -825,6 +916,9 @@ static void touch_global(AllMaps& M) {
   M.channel["__GLOBAL__"];
   M.tz_curr["__GLOBAL__"];
   M.event_curr["__GLOBAL__"];
+  M.event_descr_ax["__GLOBAL__"];
+  M.pos_cd_ax["__GLOBAL__"];
+  M.tz_alone_ax["__GLOBAL__"];
 }
 
 static arrow::Status write_mcc_totals_parquet(const std::string& path, const AllMaps& M) {
@@ -1123,6 +1217,12 @@ static void observe_row(AllMaps& M, const arrow::RecordBatch& batch, int64_t i, 
   }
   std::string et_key = event_curr_key(et_num, et_ok, cur);
 
+  std::string ed_raw = get_s("event_descr");
+  if (ed_raw.empty()) ed_raw = get_s("event_desc");
+  const std::string ed_key = string_axis_key_missing(ed_raw);
+  const std::string pos_key = string_axis_key_missing(get_s("pos_cd"));
+  const std::string tz_ak = tz_alone_key(tz_raw);
+
   bump_cooccurrence(M, mcc_k, ch_key, cur, tz_raw);
 
   if (!is_train) {
@@ -1135,6 +1235,12 @@ static void observe_row(AllMaps& M, const arrow::RecordBatch& batch, int64_t i, 
     axis_observe_pretrain(M.tz_curr["__GLOBAL__"], amount, amt_ok);
     axis_observe_pretrain(M.event_curr[et_key], amount, amt_ok);
     axis_observe_pretrain(M.event_curr["__GLOBAL__"], amount, amt_ok);
+    axis_observe_pretrain(M.event_descr_ax[ed_key], amount, amt_ok);
+    axis_observe_pretrain(M.event_descr_ax["__GLOBAL__"], amount, amt_ok);
+    axis_observe_pretrain(M.pos_cd_ax[pos_key], amount, amt_ok);
+    axis_observe_pretrain(M.pos_cd_ax["__GLOBAL__"], amount, amt_ok);
+    axis_observe_pretrain(M.tz_alone_ax[tz_ak], amount, amt_ok);
+    axis_observe_pretrain(M.tz_alone_ax["__GLOBAL__"], amount, amt_ok);
     return;
   }
 
@@ -1152,6 +1258,12 @@ static void observe_row(AllMaps& M, const arrow::RecordBatch& batch, int64_t i, 
   train_axis(M.tz_curr["__GLOBAL__"]);
   train_axis(M.event_curr[et_key]);
   train_axis(M.event_curr["__GLOBAL__"]);
+  train_axis(M.event_descr_ax[ed_key]);
+  train_axis(M.event_descr_ax["__GLOBAL__"]);
+  train_axis(M.pos_cd_ax[pos_key]);
+  train_axis(M.pos_cd_ax["__GLOBAL__"]);
+  train_axis(M.tz_alone_ax[tz_ak]);
+  train_axis(M.tz_alone_ax["__GLOBAL__"]);
 }
 
 
@@ -1165,7 +1277,7 @@ static arrow::Status load_label_event_ids(const std::string& path, std::unordere
   }
   ARROW_ASSIGN_OR_RAISE(auto rb_it, reader->GetRecordBatchReader());
   int64_t rows_seen = 0;
-  const std::string tag = ds_progress::path_basename(path) + " [labels→event_ids]";
+  const std::string tag = ds_progress::path_basename(path) + " [labels->event_ids]";
   log_msg("loading train_labels event_ids rows_meta=" + std::to_string(total_rows));
   while (true) {
     ARROW_ASSIGN_OR_RAISE(auto batch, rb_it->Next());
@@ -1229,7 +1341,7 @@ int main(int argc, char** argv) {
   if (argc >= 2) root = argv[1];
   std::string data_train = root + "/data/train/";
   std::string labels_path = root + "/data/train_labels.parquet";
-  std::string out_dir = root + "/output/global_aggregates/";
+  std::string out_dir = root + "/output/datasets/global_aggregates/";
 
   std::error_code ec;
   std::filesystem::create_directories(out_dir, ec);
@@ -1270,7 +1382,7 @@ int main(int argc, char** argv) {
           std::to_string(M.pop.train_rows) + " train_label_rows=" + std::to_string(fr) + " odds_pop=" +
           std::to_string(odds_pop));
 
-  constexpr int k_write_steps = 11;
+  constexpr int k_write_steps = 14;
   int wstep = 0;
   auto wphase = [&](const char* name) {
     ++wstep;
@@ -1300,6 +1412,16 @@ int main(int argc, char** argv) {
   if (!write_channel_mcc_top3_parquet(out_dir + "channel_mcc_top3.parquet", M).ok()) return 1;
   wphase("channel_mcc_pair.parquet");
   if (!write_channel_mcc_pair_parquet(out_dir + "channel_mcc_pair.parquet", M).ok()) return 1;
+  wphase("event_descr.parquet");
+  if (!write_string_axis_15stats(out_dir + "event_descr.parquet", M.event_descr_ax, odds_pop, "event_descr", "event_descr")
+           .ok())
+    return 1;
+  wphase("pos_cd.parquet");
+  if (!write_string_axis_15stats(out_dir + "pos_cd.parquet", M.pos_cd_ax, odds_pop, "pos_cd", "pos_cd").ok()) return 1;
+  wphase("timezone_alone.parquet");
+  if (!write_string_axis_15stats(out_dir + "timezone_alone.parquet", M.tz_alone_ax, odds_pop, "timezone", "tz_alone")
+           .ok())
+    return 1;
   ds_progress::finish_progress_line();
 
   log_msg("Done. Written to " + out_dir);

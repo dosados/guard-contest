@@ -1,5 +1,3 @@
-// Имена популяционных (глобальных) фич — синхронно с shared/global_category_aggregates.py GLOBAL_CATEGORY_FEATURE_NAMES.
-// Порядок: MCC(20) → channel(20) → TZ×currency(19) → event×currency(22) → совместные C/D(5).
 #pragma once
 
 #include <cstddef>
@@ -103,11 +101,74 @@ static const char* kGlobalCategoryFeatureNames[] = {
     "timezone_freq_in_mcc",
     "surprise_mcc_given_channel_neglog",
     "mcc_not_in_channel_top3_flag",
+    // event_descr (20): same derived layout as channel
+    "global_mean_amount_event_descr",
+    "global_std_amount_event_descr",
+    "global_median_amount_event_descr",
+    "global_q25_event_descr",
+    "global_q75_event_descr",
+    "global_q95_event_descr",
+    "global_cnt_event_descr",
+    "global_cv_event_descr",
+    "fraud_rate_event_descr",
+    "fraud_count_event_descr",
+    "train_total_count_event_descr",
+    "woe_event_descr",
+    "amount_ratio_global_mean_event_descr",
+    "global_zscore_event_descr",
+    "inv_global_cnt_event_descr",
+    "global_cnt_clean_event_descr",
+    "global_q90_event_descr",
+    "global_q99_event_descr",
+    "amount_z_vs_event_descr_median",
+    "amount_percentile_in_event_descr",
+    // pos_cd (20)
+    "global_mean_amount_pos_cd",
+    "global_std_amount_pos_cd",
+    "global_median_amount_pos_cd",
+    "global_q25_pos_cd",
+    "global_q75_pos_cd",
+    "global_q95_pos_cd",
+    "global_cnt_pos_cd",
+    "global_cv_pos_cd",
+    "fraud_rate_pos_cd",
+    "fraud_count_pos_cd",
+    "train_total_count_pos_cd",
+    "woe_pos_cd",
+    "amount_ratio_global_mean_pos_cd",
+    "global_zscore_pos_cd",
+    "inv_global_cnt_pos_cd",
+    "global_cnt_clean_pos_cd",
+    "global_q90_pos_cd",
+    "global_q99_pos_cd",
+    "amount_z_vs_pos_cd_median",
+    "amount_percentile_in_pos_cd",
+    // timezone without currency (20)
+    "global_mean_amount_tz_alone",
+    "global_std_amount_tz_alone",
+    "global_median_amount_tz_alone",
+    "global_q25_tz_alone",
+    "global_q75_tz_alone",
+    "global_q95_tz_alone",
+    "global_cnt_tz_alone",
+    "global_cv_tz_alone",
+    "fraud_rate_tz_alone",
+    "fraud_count_tz_alone",
+    "train_total_count_tz_alone",
+    "woe_tz_alone",
+    "amount_ratio_global_mean_tz_alone",
+    "global_zscore_tz_alone",
+    "inv_global_cnt_tz_alone",
+    "global_cnt_clean_tz_alone",
+    "global_q90_tz_alone",
+    "global_q99_tz_alone",
+    "amount_z_vs_tz_alone_median",
+    "amount_percentile_in_tz_alone",
 };
 
 constexpr int kNumGlobalCategoryFeatures =
     sizeof(kGlobalCategoryFeatureNames) / sizeof(kGlobalCategoryFeatureNames[0]);
 
-static_assert(kNumGlobalCategoryFeatures == 86, "global category feature count");
+static_assert(kNumGlobalCategoryFeatures == 146, "global category feature count");
 
-}  // namespace global_category
+}  

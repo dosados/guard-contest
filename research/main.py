@@ -1,26 +1,5 @@
-"""
-Permutation importance на временной валидации для XGBoost (как в training/main.py).
-
-Датасет: `output/full_dataset.parquet`. Сплит по дням — `training.config.VAL_RATIO`
-(тот же алгоритм, что в `training.main._find_time_cutoff`).
-
-Признаки: `shared.config.resolve_model_input_columns` → порядок как у `MODEL_INPUT_FEATURES`.
-
-Метрика: PR-AUC на val с `sample_weight` после `remap_sample_weight_from_dataset`, как при оценке
-XGBoost в training (опционально то же переназначение меток, что и `--xgb-remap-weight2-positives-as-zero`).
-
-Модель: бустер из `--xgb-model-path` (по умолчанию `output/model_xgb.json`).
-
-Предсказание: `iteration_range` по `best_iteration` / `best_ntree_limit`, если есть у загруженного бустера.
-
-Важность: mean (и std по повторам) для (baseline_pr_auc − pr_auc после перестановки столбца).
-
-Запуск из корня: PYTHONPATH=. python research/main.py
-"""
-
 from __future__ import annotations
 
-import argparse
 import logging
 import sys
 from collections import Counter
@@ -40,7 +19,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from shared.config import (
     MODEL_XGB_PATH,
-    OUTPUT_DIR,
+    RESEARCH_XGB_DIR,
     TRAIN_DATASET_PATH,
     remap_sample_weight_from_dataset,
     resolve_model_input_columns,
@@ -71,9 +50,7 @@ def _apply_memory_budget(
     max_memory_gb: float,
     safety_factor: float,
 ) -> tuple[int, int]:
-    """
-    Подбираем безопасные размеры train/val выборок под лимит памяти.
-    """
+    # train/val row counts under RAM budget
     budget_bytes = int(max_memory_gb * (1024 ** 3) * safety_factor)
     req_bytes = (
         _estimate_sample_memory_bytes(requested_train_rows, n_features, include_weight=True)
@@ -81,7 +58,7 @@ def _apply_memory_budget(
     )
     if req_bytes <= budget_bytes:
         logger.info(
-            "Оценка памяти сэмплов: %s (бюджет %s) — оставляем запрошенные размеры.",
+            "Sample memory estimate: %s (budget %s) - keeping requested sizes.",
             _format_gb(req_bytes),
             _format_gb(budget_bytes),
         )
@@ -95,8 +72,8 @@ def _apply_memory_budget(
         + _estimate_sample_memory_bytes(safe_val, n_features, include_weight=False)
     )
     logger.warning(
-        "Запрошенные train/val сэмплы требуют %s > бюджета %s. "
-        "Авто-уменьшение до train=%d, val=%d (оценка %s).",
+        "Requested train/val samples need %s > budget %s. "
+        "Auto-downscaled to train=%d, val=%d (estimate %s).",
         _format_gb(req_bytes),
         _format_gb(budget_bytes),
         safe_train,
@@ -131,23 +108,23 @@ def _detect_columns(path: Path) -> tuple[list[str], str]:
     names = pf.schema_arrow.names
     feature_cols = resolve_model_input_columns(names)
     if "event_dttm" not in names:
-        raise ValueError("В датасете нет колонки event_dttm")
+        raise ValueError("Dataset has no event_dttm column")
     if "target" not in names:
-        raise ValueError("В датасете нет target")
+        raise ValueError("Dataset has no target column")
     if not feature_cols:
-        raise ValueError("Не найдены колонки признаков: после исключения служебных колонок список пуст.")
+        raise ValueError("No feature columns found after excluding metadata columns.")
     return feature_cols, "event_dttm"
 
 
 def _batch_read_columns(path: Path, feature_cols: list[str], dttm_col: str) -> list[str]:
-    """Колонки для iter_batches: фичи + target + время + sample_weight при наличии."""
+    # iter_batches: features + target + dttm + sample_weight
     available = frozenset(pq.ParquetFile(path).schema_arrow.names)
     cols: list[str] = list(feature_cols) + ["target", dttm_col]
     if "sample_weight" in available:
         cols.append("sample_weight")
     missing = [c for c in cols if c not in available]
     if missing:
-        raise ValueError(f"В {path} нет колонок: {missing}")
+        raise ValueError(f"{path} is missing columns: {missing}")
     return cols
 
 
@@ -159,7 +136,7 @@ def _find_time_cutoff_paths(paths: list[Path], val_ratio: float, batch_size: int
         tag = path.name
         for rb in tqdm(
             pf.iter_batches(columns=["event_dttm"], batch_size=batch_size),
-            desc=f"Скан дат ({tag})",
+            desc=f"Scan dates ({tag})",
             unit="batch",
         ):
             s = pd.to_datetime(rb.column(0).to_pandas(), errors="coerce").dt.floor("D")
@@ -168,7 +145,7 @@ def _find_time_cutoff_paths(paths: list[Path], val_ratio: float, batch_size: int
                 by_day[k] += int(v)
                 total += int(v)
     if total == 0:
-        raise ValueError("Не удалось прочитать event_dttm для split по времени.")
+        raise ValueError("Could not read event_dttm for time-based split.")
     val_target = max(1, int(total * val_ratio))
     acc = 0
     cutoff = None
@@ -275,7 +252,7 @@ def _sample_from_stream(
     read_cols = _batch_read_columns(path, feature_cols, dttm_col)
     for rb in tqdm(
         pf.iter_batches(columns=read_cols, batch_size=batch_size),
-        desc=f"Сэмплирование ({path.name})",
+        desc=f"Sampling ({path.name})",
         unit="batch",
     ):
         dfb = rb.to_pandas()
@@ -332,11 +309,11 @@ def _sample_from_stream(
                         w_val[j] = float(wva[i])
 
     if x_train is None or y_train is None or w_train is None or x_val is None or y_val is None or w_val is None:
-        raise RuntimeError("Не удалось собрать train/val сэмплы из датасета.")
+        raise RuntimeError("Could not build train/val samples from dataset.")
 
     n_train = min(train_seen, max_train_rows)
     n_val = min(val_seen, max_val_rows)
-    logger.info("Собран train sample: %d (из %d), val sample: %d (из %d)", n_train, train_seen, n_val, val_seen)
+    logger.info("Built train sample: %d (of %d seen), val sample: %d (of %d seen)", n_train, train_seen, n_val, val_seen)
     return (
         x_train[:n_train],
         y_train[:n_train],
@@ -454,11 +431,11 @@ def _write_full_permutation_ranking_text(
     weighted_metrics: bool,
 ) -> None:
     lines: list[str] = [
-        "Permutation importance — полное ранжирование признаков (XGBoost)",
+        "Permutation importance - full feature ranking (XGBoost)",
         "",
-        "Интерпретация: mean_drop = baseline_pr_auc - pr_auc после случайной перестановки значений признака "
-        "внутри валидационного сэмпла; std_drop — разброс по повторам перестановки.",
-        f"baseline_pr_auc: {baseline:.10f}" + (" (weighted, как в training/main при eval)" if weighted_metrics else ""),
+        "Interpretation: mean_drop = baseline_pr_auc - pr_auc after randomly shuffling a feature "
+        "within the validation sample; std_drop - spread across shuffle repeats.",
+        f"baseline_pr_auc: {baseline:.10f}" + (" (weighted, as in training/main eval)" if weighted_metrics else ""),
         f"model: {model_label}",
         f"val_rows (sample): {val_rows}",
         f"repeats_per_feature: {repeats}",
@@ -483,58 +460,42 @@ def main() -> None:
         datefmt="%H:%M:%S",
     )
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--max-train-rows", type=int, default=2_000_000, help="Макс. число строк train для сэмпла")
-    parser.add_argument("--max-val-rows", type=int, default=600_000, help="Макс. число строк val для сэмпла")
-    parser.add_argument("--batch-size", type=int, default=250_000, help="Размер parquet batch (меньше => безопаснее по RAM)")
-    parser.add_argument("--repeats", type=int, default=5, help="Число повторов permutation для каждой фичи")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    parser.add_argument("--max-memory-gb", type=float, default=20.0, help="Верхний предел RAM для процесса")
-    parser.add_argument(
-        "--xgb-model-path",
-        type=Path,
-        default=MODEL_XGB_PATH,
-        help="Путь к XGBoost-модели (по умолчанию output/model_xgb.json).",
-    )
-    parser.add_argument(
-        "--xgb-remap-weight2-positives-as-zero",
-        action="store_true",
-        help="Совпадение меток val с флагом --xgb-remap-weight2-positives-as-zero при обучении XGB.",
-    )
-    parser.add_argument(
-        "--memory-safety-factor",
-        type=float,
-        default=0.55,
-        help="Доля RAM-бюджета под train/val массивы (остальное под pandas/модель)",
-    )
-    args = parser.parse_args()
+    max_train_rows = 2_000_000
+    max_val_rows = 600_000
+    batch_size = 250_000
+    repeats = 5
+    seed = 42
+    max_memory_gb = 20.0
+    xgb_model_path = MODEL_XGB_PATH
+    xgb_remap_weight2_positives_as_zero = False
+    memory_safety_factor = 0.55
 
     if not TRAIN_DATASET_PATH.exists():
         raise FileNotFoundError(
-            f"Не найден {TRAIN_DATASET_PATH}. "
-            "Сначала соберите датасет: ./dataset_cpp/build/build_dataset ."
+            f"Not found: {TRAIN_DATASET_PATH}. "
+            "Build the dataset first (guard-cpp): build_global_aggregates and build_dataset."
         )
-    if not args.xgb_model_path.exists():
+    if not xgb_model_path.exists():
         raise FileNotFoundError(
-            f"Не найдена модель {args.xgb_model_path}. "
-            "Сначала обучите XGBoost: PYTHONPATH=. python training/main.py --xgb-config best"
+            f"Model not found: {xgb_model_path}. "
+            "Train XGBoost first: PYTHONPATH=. python training/main.py"
         )
-    logger.info("Файл датасета: %s", TRAIN_DATASET_PATH)
-    logger.info("Файл XGBoost-модели: %s", args.xgb_model_path)
+    logger.info("Dataset file: %s", TRAIN_DATASET_PATH)
+    logger.info("XGBoost model file: %s", xgb_model_path)
 
-    if args.max_memory_gb <= 1.0:
-        raise ValueError("--max-memory-gb должен быть > 1")
-    if not (0.2 <= args.memory_safety_factor <= 0.9):
-        raise ValueError("--memory-safety-factor должен быть в диапазоне [0.2, 0.9]")
+    if max_memory_gb <= 1.0:
+        raise ValueError("max_memory_gb must be > 1")
+    if not (0.2 <= memory_safety_factor <= 0.9):
+        raise ValueError("memory_safety_factor must be in [0.2, 0.9]")
 
     feature_cols, dttm_col = _detect_columns(TRAIN_DATASET_PATH)
-    logger.info("Признаков для анализа: %d (%s …)", len(feature_cols), feature_cols[0])
+    logger.info("Features for analysis: %d (%s …)", len(feature_cols), feature_cols[0])
     safe_train_rows, safe_val_rows = _apply_memory_budget(
-        requested_train_rows=args.max_train_rows,
-        requested_val_rows=args.max_val_rows,
+        requested_train_rows=max_train_rows,
+        requested_val_rows=max_val_rows,
         n_features=len(feature_cols),
-        max_memory_gb=args.max_memory_gb,
-        safety_factor=args.memory_safety_factor,
+        max_memory_gb=max_memory_gb,
+        safety_factor=memory_safety_factor,
     )
     cutoff_day = _find_time_cutoff(TRAIN_DATASET_PATH, VAL_RATIO)
     x_train, y_train, w_train, x_val, y_val, w_val = _sample_from_stream(
@@ -544,29 +505,31 @@ def main() -> None:
         cutoff_day=cutoff_day,
         max_train_rows=safe_train_rows,
         max_val_rows=safe_val_rows,
-        batch_size=args.batch_size,
-        random_seed=args.seed,
-        remap_weight2_positive_label_to_zero=args.xgb_remap_weight2_positives_as_zero,
+        batch_size=batch_size,
+        random_seed=seed,
+        remap_weight2_positive_label_to_zero=xgb_remap_weight2_positives_as_zero,
     )
-    if args.xgb_remap_weight2_positives_as_zero:
-        logger.info("Метки val/train-сэмпла: включено переназначение target=1, sample_weight=2 → 0 (как в training XGB).")
+    if xgb_remap_weight2_positives_as_zero:
+        logger.info(
+            "Val/train sample labels: remap enabled - target=1, sample_weight=2 -> 0 (same as training XGB)."
+        )
 
     logger.info("=== Permutation importance: xgboost (pretrained) ===")
-    booster = _load_xgb_booster(args.xgb_model_path)
+    booster = _load_xgb_booster(xgb_model_path)
     validate_xgboost_booster_feature_count(booster)
 
     def predict_fn(x: np.ndarray) -> np.ndarray:
         return _predict_proba(booster, x, feature_cols)
 
-    model_label = f"xgboost: {args.xgb_model_path}"
+    model_label = f"xgboost: {xgb_model_path}"
 
     baseline, importances, stds = _compute_permutation_importance(
         predict_fn=predict_fn,
         x_val=x_val.copy(),
         y_val=y_val,
         feature_cols=feature_cols,
-        repeats=args.repeats,
-        random_seed=args.seed,
+        repeats=repeats,
+        random_seed=seed,
         sample_weight=w_val,
     )
     result_frames = [_importances_to_df("xgboost", baseline, importances, stds)]
@@ -581,7 +544,7 @@ def main() -> None:
         .sort_values("mean_importance_drop_pr_auc", ascending=False, ignore_index=True)
     )
 
-    out_dir = OUTPUT_DIR / "research"
+    out_dir = RESEARCH_XGB_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
     per_model_path = out_dir / "feature_importance_per_model.csv"
     summary_path = out_dir / "feature_importance_summary.csv"
@@ -600,9 +563,9 @@ def main() -> None:
     lines.append("Feature importance report (permutation importance on time-based validation)")
     lines.append(f"Model: {model_label}")
     lines.append(f"Rows used: train={len(x_train)}, val={len(x_val)}")
-    lines.append(f"Permutation repeats: {args.repeats}")
-    lines.append(f"PR-AUC on val: weighted (sample_weight после remap), как в training/main.")
-    lines.append(f"Полный список признаков по важности: {full_ranking_path.name}")
+    lines.append(f"Permutation repeats: {repeats}")
+    lines.append(f"PR-AUC on val: weighted (sample_weight after remap), as in training/main.")
+    lines.append(f"Full feature ranking by importance: {full_ranking_path.name}")
     lines.append("")
     lines.append("TOP most important features:")
     for i, row in top_df.iterrows():
@@ -619,7 +582,7 @@ def main() -> None:
         baseline=baseline,
         model_label=model_label,
         val_rows=len(x_val),
-        repeats=args.repeats,
+        repeats=repeats,
         weighted_metrics=True,
     )
     top_png, low_png = _plot_summary(summary, out_dir=out_dir, top_k=top_k)
@@ -627,22 +590,22 @@ def main() -> None:
         out_path=md_path,
         train_rows=len(x_train),
         val_rows=len(x_val),
-        repeats=args.repeats,
-        max_memory_gb=args.max_memory_gb,
+        repeats=repeats,
+        max_memory_gb=max_memory_gb,
         summary=summary,
         top_png=top_png,
         low_png=low_png,
     )
 
-    logger.info("Сохранено: %s", per_model_path)
-    logger.info("Сохранено: %s", summary_path)
-    logger.info("Сохранено: %s", txt_path)
-    logger.info("Сохранено: %s (полный рейтинг всех фич)", full_ranking_path)
-    logger.info("Сохранено: %s", md_path)
-    logger.info("Сохранено: %s", top_png)
-    logger.info("Сохранено: %s", low_png)
-    logger.info("Самая важная фича: %s", top_df.iloc[0]["feature"])
-    logger.info("Самая неважная фича: %s", low_df.iloc[0]["feature"])
+    logger.info("Saved: %s", per_model_path)
+    logger.info("Saved: %s", summary_path)
+    logger.info("Saved: %s", txt_path)
+    logger.info("Saved: %s (full ranking of all features)", full_ranking_path)
+    logger.info("Saved: %s", md_path)
+    logger.info("Saved: %s", top_png)
+    logger.info("Saved: %s", low_png)
+    logger.info("Most important feature: %s", top_df.iloc[0]["feature"])
+    logger.info("Least important feature: %s", low_df.iloc[0]["feature"])
 
 
 if __name__ == "__main__":

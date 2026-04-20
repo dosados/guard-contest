@@ -1,13 +1,6 @@
-"""
-Обучение XGBoost на объединённом full_dataset.parquet.
-Сплит train/val по времени; батчи parquet через DataIter + ExtMemQuantileDMatrix (XGBoost 3.x):
-квантили и промежуточные данные выносятся на диск (cache_prefix), без загрузки всего parquet в RAM.
-При отсутствии ExtMemQuantileDMatrix — откат на QuantileDMatrix (может потребовать много RAM).
-"""
-
 from __future__ import annotations
 
-import argparse
+import os
 import gc
 import logging
 import shutil
@@ -30,8 +23,9 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from shared.config import (
     MODEL_XGB_PATH,
-    OUTPUT_DIR,
     TRAIN_DATASET_PATH,
+    XGB_EXTMEM_TRAIN_SINGLE_DIR,
+    XGB_EXTMEM_VAL_SINGLE_DIR,
     remap_sample_weight_from_dataset,
     resolve_model_input_columns,
 )
@@ -46,7 +40,7 @@ from training.config import (
 
 logger = logging.getLogger(__name__)
 
-# full_dataset.parquet (C++ build_dataset): event_dttm как utf8, например "2024-10-01 05:29:14"
+# full_dataset.parquet (C++ build_dataset): event_dttm as utf8, e.g. "2024-10-01 05:29:14"
 _EVENT_DTTM_STRING_FORMAT = "%Y-%m-%d %H:%M:%S"
 _EVENT_DTTM_TS_TYPE = pa.timestamp("s")
 
@@ -59,7 +53,7 @@ def _pd_timestamp_cutoff_to_arrow_scalar_ts_s(cutoff_day: pd.Timestamp) -> pa.Sc
 
 
 def _event_dttm_array_to_timestamp_seconds(arr: pa.Array) -> pa.Array:
-    """event_dttm из parquet → timestamp[s] для сравнений в pc.*; невалидное → null."""
+    # event_dttm → timestamp[s] for pyarrow.compute; invalid → null
     if len(arr) == 0:
         return pa.array([], type=_EVENT_DTTM_TS_TYPE)
     if pa.types.is_dictionary(arr.type):
@@ -69,7 +63,7 @@ def _event_dttm_array_to_timestamp_seconds(arr: pa.Array) -> pa.Array:
         return pc.cast(arr, _EVENT_DTTM_TS_TYPE)
     if pa.types.is_string(t) or pa.types.is_large_string(t):
         return pc.strptime(arr, format=_EVENT_DTTM_STRING_FORMAT, unit="s")
-    logger.warning("event_dttm: неожиданный тип %s, парсинг через pandas", t)
+    logger.warning("event_dttm: unexpected type %s, parsing via pandas", t)
     p = pd.to_datetime(arr.to_pandas(), errors="coerce")
     return pc.cast(pa.array(p, from_pandas=True), _EVENT_DTTM_TS_TYPE)
 
@@ -80,9 +74,7 @@ def _train_val_mask_from_event_dttm(
     *,
     train_mode: bool,
 ) -> np.ndarray:
-    """
-    Маска строк: train — event_dttm < cutoff; val — иначе (как pandas, в т.ч. NaT/невалид → в val).
-    """
+    # train: dttm < cutoff; val: else
     ts = _event_dttm_array_to_timestamp_seconds(dttm_arr)
     lt = pc.less(ts, cutoff_ts_scalar)
     lt_pd = pc.fill_null(lt, False)
@@ -91,7 +83,7 @@ def _train_val_mask_from_event_dttm(
 
 
 def _arrow_array_to_float64(arr: pa.Array) -> np.ndarray:
-    """Один столбец Arrow → float64 (NaN для null / нечисла); без полного DataFrame."""
+    # Arrow column → float64
     n = len(arr)
     if n == 0:
         return np.empty(0, dtype=np.float64)
@@ -153,14 +145,14 @@ def _detect_columns(path: Path) -> tuple[list[str], str]:
     names = pf.schema_arrow.names
     feature_cols = resolve_model_input_columns(names)
     if "event_dttm" not in names:
-        raise ValueError("В датасете нет колонки event_dttm")
+        raise ValueError("Dataset has no event_dttm column")
     if "target" not in names or "sample_weight" not in names:
-        raise ValueError("В датасете нет target/sample_weight")
+        raise ValueError("Dataset has no target/sample_weight columns")
     return feature_cols, "event_dttm"
 
 
 def _find_time_cutoff(path: Path, val_ratio: float, batch_size: int = 2_500_000) -> pd.Timestamp:
-    """Определяем time-cutoff по дням без полной загрузки датасета (для grid search и др.)."""
+    # time cutoff by day without loading full dataset
     pf = pq.ParquetFile(path)
     by_day: Counter[pd.Timestamp] = Counter()
     total = 0
@@ -177,7 +169,7 @@ def _find_time_cutoff(path: Path, val_ratio: float, batch_size: int = 2_500_000)
             by_day[day] += int(c)
             total += int(c)
     if total == 0:
-        raise ValueError("Не удалось прочитать event_dttm для split по времени.")
+        raise ValueError("Could not read event_dttm for time-based split.")
     val_target = max(1, int(total * val_ratio))
     acc = 0
     cutoff = None
@@ -197,7 +189,7 @@ def _count_val_rows(
     cutoff_day: pd.Timestamp,
     batch_size: int = 2_500_000,
 ) -> int:
-    """Число val-строк (dttm >= cutoff); без полного DataFrame на батч."""
+    # count val rows (dttm >= cutoff)
     pf = pq.ParquetFile(path)
     n_val = 0
     cutoff_scalar = _pd_timestamp_cutoff_to_arrow_scalar_ts_s(cutoff_day)
@@ -238,10 +230,6 @@ def _build_xgb_train_params(config_mode: str) -> dict[str, float | int | str]:
 
 
 def _xgb_predict_with_best_iteration(booster, dmatrix) -> np.ndarray:
-    """
-    После early stopping предсказание по лучшей итерации (иначе по умолчанию могут браться все деревья).
-    Совместимость XGBoost 1.x (best_ntree_limit / ntree_limit) и 2.x (iteration_range).
-    """
     bi = getattr(booster, "best_iteration", None)
     if bi is not None and bi >= 0:
         try:
@@ -269,8 +257,6 @@ def _rm_tree(path: Path) -> None:
 
 
 class ParquetTrainValDataIter(DataIter):
-    """Батчи parquet → только train или только val; reset перевычитывает файл с начала."""
-
     def __init__(
         self,
         parquet_path: Path,
@@ -353,23 +339,20 @@ def train_xgb_streaming_prauc(
     verbose_eval: int | None = None,
     remap_weight2_positive_label_to_zero: bool = False,
 ) -> tuple[float, Any, Callable[[], None]]:
-    """
-    Один прогон как в main: QuantileDMatrix / ExtMemQuantileDMatrix, eval + early stopping, PR-AUC (val) с sample_weight.
-    При remap_weight2_positive_label_to_zero=True метки на train/val совпадают с флагом --xgb-remap-weight2-positives-as-zero.
-    Возвращает (pr_auc, booster, cleanup). После save_model booster вызовите cleanup() (освобождает DMatrix и дисковый кэш).
-    """
     import xgboost as xgb
 
     rounds = max(1, int(num_boost_round if num_boost_round is not None else XGB_PARAMS.get("n_estimators", 600)))
     br = int(batch_rows if batch_rows is not None else XGB_EXTERNAL_PARQUET_BATCH_ROWS)
+    if batch_rows is None and os.environ.get("GUARD_XGB_PARQUET_BATCH_ROWS"):
+        br = max(50_000, int(os.environ["GUARD_XGB_PARQUET_BATCH_ROWS"]))
     es = int(XGB_EARLY_STOPPING_ROUNDS if early_stopping_rounds is None else early_stopping_rounds)
     ve = int(XGB_EVAL_VERBOSE_EVERY if verbose_eval is None else verbose_eval)
 
     use_extmem = hasattr(xgb, "ExtMemQuantileDMatrix")
     if not use_extmem:
         logger.warning(
-            "В этой сборке XGBoost нет ExtMemQuantileDMatrix — используется QuantileDMatrix "
-            "(без дискового кэша итератора, возможен большой расход RAM)."
+            "This XGBoost build has no ExtMemQuantileDMatrix - using QuantileDMatrix "
+            "(no on-disk iterator cache; high RAM use possible)."
         )
 
     train_cp = str((ext_train_cache / "qdm").resolve()) if use_extmem else None
@@ -408,9 +391,9 @@ def train_xgb_streaming_prauc(
     yva = None
     val_it = None
 
-    logger.info("Подсчёт val-строк по event_dttm …")
+    logger.info("Counting val rows by event_dttm …")
     n_val = _count_val_rows(parquet_path, dttm_col, cutoff_day, batch_size=br)
-    logger.info("Val rows (оценка по time split): %d", n_val)
+    logger.info("Val rows (time-split estimate): %d", n_val)
 
     if n_val > 0:
         if use_extmem:
@@ -452,18 +435,18 @@ def train_xgb_streaming_prauc(
             w_eval = np.asarray(dval.get_weight(), dtype=np.float64)
             if w_eval.size == y_int.size:
                 pr = float(average_precision_score(y_int, p, sample_weight=w_eval))
-                logger.info("PR-AUC (val): sklearn с sample_weight как в DMatrix eval")
+                logger.info("PR-AUC (val): sklearn with sample_weight like DMatrix eval")
             else:
                 pr = float(average_precision_score(y_int, p))
-                logger.warning("PR-AUC (val): sklearn без весов (размер weight не совпал с label)")
+                logger.warning("PR-AUC (val): sklearn without weights (weight size mismatch vs label)")
         except Exception:
             pr = float(average_precision_score(y_int, p))
-            logger.warning("PR-AUC (val): sklearn без весов (get_weight недоступен)")
+            logger.warning("PR-AUC (val): sklearn without weights (get_weight unavailable)")
         bi = getattr(booster, "best_iteration", None)
         if bi is not None and bi >= 0:
-            logger.info("XGBoost best_iteration (лучший aucpr на eval по логу train): %s", bi)
+            logger.info("XGBoost best_iteration (best aucpr on eval from train log): %s", bi)
     else:
-        logger.warning("XGBoost: нет val-строк — PR-AUC не считается.")
+        logger.warning("XGBoost: no val rows - PR-AUC not computed.")
 
     def cleanup() -> None:
         if not use_extmem:
@@ -478,7 +461,7 @@ def train_xgb_streaming_prauc(
         gc.collect()
         _rm_tree(ext_train_cache)
         _rm_tree(ext_val_cache)
-        logger.info("Дисковый кэш ExtMemQuantileDMatrix удалён (%s, %s).", ext_train_cache.name, ext_val_cache.name)
+        logger.info("ExtMemQuantileDMatrix disk cache removed (%s, %s).", ext_train_cache.name, ext_val_cache.name)
 
     return pr, booster, cleanup
 
@@ -489,74 +472,61 @@ def main() -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--xgb-config",
-        choices=("best", "default"),
-        default="best",
-        help="best (по умолчанию): гиперпараметры из training/grid_search/xgb_best_params.json; "
-        "default: базовые XGB_PARAMS из training/config.py",
-    )
-    parser.add_argument(
-        "--xgb-remap-weight2-positives-as-zero",
-        action="store_true",
-        help=(
-            "При обучении XGBoost: target=0 без изменений; target=1 с sample_weight=2 (как в parquet, до remap) "
-            "подавать в модель как класс 0; target=1 с sample_weight=5 остаётся классом 1. "
-            "Веса обучения по-прежнему через remap_sample_weight_from_dataset."
-        ),
-    )
-    args = parser.parse_args()
+    xgb_config = "best"
+    xgb_remap_weight2_positives_as_zero = False
 
     if not TRAIN_DATASET_PATH.exists():
         raise FileNotFoundError(
-            f"Не найден {TRAIN_DATASET_PATH}. "
-            "Сначала соберите датасет: ./dataset_cpp/build/build_dataset ."
+            f"Not found: {TRAIN_DATASET_PATH}. "
+            "Build the dataset first (conda env guard-cpp): build_dataset -> output/datasets/train/full_dataset.parquet"
         )
     feature_cols, dttm_col = _detect_columns(TRAIN_DATASET_PATH)
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    MODEL_XGB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    XGB_EXTMEM_TRAIN_SINGLE_DIR.parent.mkdir(parents=True, exist_ok=True)
     cutoff_day = _find_time_cutoff(TRAIN_DATASET_PATH, VAL_RATIO)
 
     results: list[tuple[str, float]] = []
 
     try:
-        params = _build_xgb_train_params(args.xgb_config)
+        params = _build_xgb_train_params(xgb_config)
         rounds = max(1, int(XGB_PARAMS.get("n_estimators", 600)))
-        logger.info("XGBoost config mode: %s", args.xgb_config)
-        if args.xgb_remap_weight2_positives_as_zero:
+        if os.environ.get("GUARD_XGB_NUM_BOOST_ROUND"):
+            rounds = max(1, int(os.environ["GUARD_XGB_NUM_BOOST_ROUND"]))
+        logger.info("XGBoost config mode: %s", xgb_config)
+        if xgb_remap_weight2_positives_as_zero:
             logger.info(
-                "XGBoost: включено переназначение меток — target=1 и sample_weight=2 → label 0 при обучении/val-метриках."
+                "XGBoost: label remap enabled - target=1 and sample_weight=2 -> label 0 for train/val metrics."
             )
         logger.info("XGBoost train params: %s, num_boost_round=%d", params, rounds)
 
-        logger.info("=== Обучение XGBoost ===")
+        logger.info("=== Training XGBoost ===")
         pr, booster, cleanup = train_xgb_streaming_prauc(
             TRAIN_DATASET_PATH,
             feature_cols,
             dttm_col,
             cutoff_day,
             params,
-            ext_train_cache=OUTPUT_DIR / "xgb_extmem_train_single",
-            ext_val_cache=OUTPUT_DIR / "xgb_extmem_val_single",
+            ext_train_cache=XGB_EXTMEM_TRAIN_SINGLE_DIR,
+            ext_val_cache=XGB_EXTMEM_VAL_SINGLE_DIR,
             num_boost_round=rounds,
-            remap_weight2_positive_label_to_zero=args.xgb_remap_weight2_positives_as_zero,
+            remap_weight2_positive_label_to_zero=xgb_remap_weight2_positives_as_zero,
         )
         results.append(("XGBoost", pr))
         booster.save_model(str(MODEL_XGB_PATH))
-        logger.info("XGBoost PR-AUC (val): %.6f → %s", pr, MODEL_XGB_PATH)
+        logger.info("XGBoost PR-AUC (val): %.6f -> %s", pr, MODEL_XGB_PATH)
         cleanup()
 
     except Exception as e:
-        logger.warning("XGBoost пропущен: %s", e)
-        _rm_tree(OUTPUT_DIR / "xgb_extmem_train_single")
-        _rm_tree(OUTPUT_DIR / "xgb_extmem_val_single")
+        logger.warning("XGBoost skipped: %s", e)
+        _rm_tree(XGB_EXTMEM_TRAIN_SINGLE_DIR)
+        _rm_tree(XGB_EXTMEM_VAL_SINGLE_DIR)
 
-    logger.info("=== Сводка PR-AUC (валидация по времени) ===")
+    logger.info("=== PR-AUC summary (time-based validation) ===")
     for name, pr in sorted(results, key=lambda x: -x[1]):
         logger.info("  %s: %.6f", name, pr)
     if results:
         best = max(results, key=lambda x: x[1])
-        logger.info("Лучшая по PR-AUC: %s (%.6f)", best[0], best[1])
+        logger.info("Best by PR-AUC: %s (%.6f)", best[0], best[1])
 
 
 if __name__ == "__main__":

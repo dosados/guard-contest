@@ -1,4 +1,3 @@
-// Общая отрисовка прогресса в stderr для build_dataset / build_global_aggregates.
 #pragma once
 
 #include <cstdint>
@@ -14,7 +13,6 @@ inline std::string path_basename(const std::string& p) {
   return p.substr(pos + 1);
 }
 
-/** Прогресс по строкам: одна строка (\r + ANSI erase line). line_prefix — например "[build_dataset] ". */
 inline void render_row_progress(int64_t done, int64_t total, const std::string& file_tag,
                                 const std::string& line_prefix = {}) {
   constexpr int kBarW = 40;
@@ -37,7 +35,6 @@ inline void render_row_progress(int64_t done, int64_t total, const std::string& 
 
 inline void finish_progress_line() { std::cerr << "\n"; }
 
-/** Ступенчатый прогресс (загрузка N файлов, запись и т.д.). */
 inline void render_phase_progress(int step_1based, int total_steps, const std::string& detail,
                                   const std::string& line_prefix = {}) {
   constexpr int kBarW = 40;
@@ -57,4 +54,4 @@ inline void render_phase_progress(int step_1based, int total_steps, const std::s
   std::cerr << std::flush;
 }
 
-}  // namespace ds_progress
+}  

@@ -14,4 +14,6 @@ dependencies:
   - arrow-cpp
   - parquet-cpp
   - openssl
+  - pip:
+      - catboost>=1.2
 prefix: /home/timofey/miniconda3/envs/guard-contest

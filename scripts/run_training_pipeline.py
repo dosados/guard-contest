@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-"""
-Запускает по очереди длинные задачи обучения/исследования.
-При ошибке (ненулевой exit code) пишет предупреждение и переходит к следующей программе.
-Запуск из корня репозитория: python scripts/run_training_pipeline.py
-"""
-
 from __future__ import annotations
 
 import subprocess
@@ -14,11 +8,16 @@ from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-# (имя для лога, путь к скрипту относительно корня репозитория)
+# (log label, script path relative to repo root)
 _JOBS: list[tuple[str, str]] = [
     ("xgb_grid_search", "training/xgb_grid_search.py"),
-    ("research_main", "research/main.py"),
+    ("cat_grid_search", "training/cat_grid_search.py"),
     ("xgb_train", "training/main.py"),
+    ("cat_train", "training/cat_main.py"),
+    ("research_xgb", "research/main.py"),
+    ("research_cat", "research/cat_main.py"),
+    ("submission_xgb", "submission/main.py"),
+    ("submission_cat", "submission/cat_submission.py"),
 ]
 
 
@@ -28,7 +27,7 @@ def main() -> int:
         script_path = _PROJECT_ROOT / rel_script
         if not script_path.is_file():
             print(
-                f"[ERROR] {name}: файл не найден: {script_path}",
+                f"[ERROR] {name}: script not found: {script_path}",
                 flush=True,
             )
             failures.append(name)
@@ -41,24 +40,24 @@ def main() -> int:
         try:
             proc = subprocess.run(cmd, cwd=_PROJECT_ROOT)
         except OSError as exc:
-            print(f"[ERROR] {name}: не удалось запустить процесс: {exc}", flush=True)
+            print(f"[ERROR] {name}: failed to start process: {exc}", flush=True)
             failures.append(name)
             continue
 
         if proc.returncode != 0:
             print(
-                f"[WARN] {name}: завершился с кодом {proc.returncode}, переходим к следующей задаче.",
+                f"[WARN] {name}: exited with code {proc.returncode}, continuing to next job.",
                 flush=True,
             )
             failures.append(name)
         else:
-            print(f"[OK] {name}: успешно завершён.", flush=True)
+            print(f"[OK] {name}: finished successfully.", flush=True)
 
     print(f"\n{'=' * 60}", flush=True)
     if failures:
-        print(f"Итог: с ошибкой: {', '.join(failures)}", flush=True)
+        print(f"Summary: failed jobs: {', '.join(failures)}", flush=True)
         return 1
-    print("Итог: все задачи завершились успешно.", flush=True)
+    print("Summary: all jobs finished successfully.", flush=True)
     return 0
 
 

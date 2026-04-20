@@ -1,8 +1,3 @@
-"""
-Популяционные фичи по категориям: те же parquet, что build_global_aggregates / build_dataset (инференс).
-Ключи и формулы согласованы с dataset_cpp/build_dataset.cpp (GlobalAggregatesLoader).
-"""
-
 from __future__ import annotations
 
 import math
@@ -12,7 +7,7 @@ from typing import Any, Mapping
 import numpy as np
 import pandas as pd
 
-# Синхронно с global_category_features.hpp / C++
+# Keep in sync with global_category_features.hpp / C++
 MCC_GLOBAL_KEY: int = -(2**63)
 MCC_MISSING_KEY: int = -2
 EPS = 1e-9
@@ -104,6 +99,66 @@ GLOBAL_CATEGORY_FEATURE_NAMES: tuple[str, ...] = (
     "timezone_freq_in_mcc",
     "surprise_mcc_given_channel_neglog",
     "mcc_not_in_channel_top3_flag",
+    "global_mean_amount_event_descr",
+    "global_std_amount_event_descr",
+    "global_median_amount_event_descr",
+    "global_q25_event_descr",
+    "global_q75_event_descr",
+    "global_q95_event_descr",
+    "global_cnt_event_descr",
+    "global_cv_event_descr",
+    "fraud_rate_event_descr",
+    "fraud_count_event_descr",
+    "train_total_count_event_descr",
+    "woe_event_descr",
+    "amount_ratio_global_mean_event_descr",
+    "global_zscore_event_descr",
+    "inv_global_cnt_event_descr",
+    "global_cnt_clean_event_descr",
+    "global_q90_event_descr",
+    "global_q99_event_descr",
+    "amount_z_vs_event_descr_median",
+    "amount_percentile_in_event_descr",
+    "global_mean_amount_pos_cd",
+    "global_std_amount_pos_cd",
+    "global_median_amount_pos_cd",
+    "global_q25_pos_cd",
+    "global_q75_pos_cd",
+    "global_q95_pos_cd",
+    "global_cnt_pos_cd",
+    "global_cv_pos_cd",
+    "fraud_rate_pos_cd",
+    "fraud_count_pos_cd",
+    "train_total_count_pos_cd",
+    "woe_pos_cd",
+    "amount_ratio_global_mean_pos_cd",
+    "global_zscore_pos_cd",
+    "inv_global_cnt_pos_cd",
+    "global_cnt_clean_pos_cd",
+    "global_q90_pos_cd",
+    "global_q99_pos_cd",
+    "amount_z_vs_pos_cd_median",
+    "amount_percentile_in_pos_cd",
+    "global_mean_amount_tz_alone",
+    "global_std_amount_tz_alone",
+    "global_median_amount_tz_alone",
+    "global_q25_tz_alone",
+    "global_q75_tz_alone",
+    "global_q95_tz_alone",
+    "global_cnt_tz_alone",
+    "global_cv_tz_alone",
+    "fraud_rate_tz_alone",
+    "fraud_count_tz_alone",
+    "train_total_count_tz_alone",
+    "woe_tz_alone",
+    "amount_ratio_global_mean_tz_alone",
+    "global_zscore_tz_alone",
+    "inv_global_cnt_tz_alone",
+    "global_cnt_clean_tz_alone",
+    "global_q90_tz_alone",
+    "global_q99_tz_alone",
+    "amount_z_vs_tz_alone_median",
+    "amount_percentile_in_tz_alone",
 )
 
 _REQUIRED_PARQUET = (
@@ -117,6 +172,9 @@ _REQUIRED_PARQUET = (
     "mcc_tz_joint.parquet",
     "channel_mcc_top3.parquet",
     "channel_mcc_pair.parquet",
+    "event_descr.parquet",
+    "pos_cd.parquet",
+    "timezone_alone.parquet",
 )
 
 
@@ -216,6 +274,39 @@ def _tz_curr_key(tz: Any, cur: Any) -> str:
     if not c:
         c = "__MISSING_CCY__"
     return t + "\x1f" + c
+
+
+def _string_axis_key_missing(raw: Any) -> str:
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+        return "__MISSING__"
+    if isinstance(raw, float) and not math.isfinite(float(raw)):
+        return "__MISSING__"
+    s = str(raw).strip()
+    if not s or s.lower() == "nan":
+        return "__MISSING__"
+    return s
+
+
+def _tz_alone_key(tz_raw: Any) -> str:
+    if tz_raw is None or (isinstance(tz_raw, float) and pd.isna(tz_raw)):
+        return "__MISSING_TZ_ALONE__"
+    if isinstance(tz_raw, float) and not math.isfinite(float(tz_raw)):
+        return "__MISSING_TZ_ALONE__"
+    t = str(tz_raw).strip()
+    if not t or t.lower() == "nan":
+        return "__MISSING_TZ_ALONE__"
+    return t
+
+
+def _axis_key_from_parquet_cell(cell: Any, tz_alone_file: bool) -> str:
+    if cell is None or (isinstance(cell, float) and pd.isna(cell)):
+        return "__MISSING_TZ_ALONE__" if tz_alone_file else "__MISSING__"
+    a = str(cell).strip()
+    if a == "__GLOBAL__":
+        return "__GLOBAL__"
+    if tz_alone_file:
+        return "__MISSING_TZ_ALONE__" if a in ("", "__MISSING_TZ_ALONE__") else a
+    return "__MISSING__" if a in ("", "__MISSING__") else a
 
 
 def _et_curr_key(et: float, et_ok: bool, cur_raw: Any) -> str:
@@ -351,14 +442,15 @@ def _put_block_ev(amount: float, s: np.ndarray | None, out: list[float]) -> None
 
 
 class GlobalCategoryLookups:
-    """Загрузка output/global_aggregates/*.parquet один раз на процесс инференса."""
-
     def __init__(self, aggregates_dir: Path) -> None:
         self.loaded = False
         self.mcc: dict[int, np.ndarray] = {}
         self.channel: dict[str, np.ndarray] = {}
         self.tz: dict[str, np.ndarray] = {}
         self.event: dict[str, np.ndarray] = {}
+        self.axis_event_descr: dict[str, np.ndarray] = {}
+        self.axis_pos_cd: dict[str, np.ndarray] = {}
+        self.axis_tz_alone: dict[str, np.ndarray] = {}
         self.mcc_totals_n: dict[int, int] = {}
         self.mcc_ch_cnt: dict[str, int] = {}
         self.mcc_cur_cnt: dict[str, int] = {}
@@ -373,7 +465,7 @@ class GlobalCategoryLookups:
         missing = [str(d / name) for name in _REQUIRED_PARQUET if not (d / name).is_file()]
         if missing:
             raise FileNotFoundError(
-                "Отсутствуют обязательные parquet глобальных агрегатов (сначала соберите build_global_aggregates): "
+                "Missing required global aggregate parquet files (run build_global_aggregates first): "
                 + "; ".join(missing)
             )
 
@@ -389,6 +481,9 @@ class GlobalCategoryLookups:
         self.ch_mcc_pair_cnt.clear()
         self.ch_total_n.clear()
         self.ch_top3_mcc.clear()
+        self.axis_event_descr.clear()
+        self.axis_pos_cd.clear()
+        self.axis_tz_alone.clear()
 
         df_m = pd.read_parquet(d / "mcc.parquet")
         for _, r in df_m.iterrows():
@@ -534,10 +629,90 @@ class GlobalCategoryLookups:
             chk = _channel_key_from_stored_parts(r["channel_indicator_type"], r["channel_indicator_subtype"])
             self.ch_mcc_pair_cnt[f'{chk}\x1f{int(r["mcc_code"])}'] = int(r["cnt"])
 
-        if not self.mcc or not self.channel or not self.tz or not self.event:
-            raise RuntimeError(f"global aggregates: пустые основные таблицы после чтения {d}")
+        df_ed = pd.read_parquet(d / "event_descr.parquet")
+        for _, r in df_ed.iterrows():
+            key = _axis_key_from_parquet_cell(r["event_descr"], False)
+            self.axis_event_descr[key] = np.array(
+                [
+                    r["global_mean_amount_event_descr"],
+                    r["global_std_amount_event_descr"],
+                    r["global_median_amount_event_descr"],
+                    r["global_q25_event_descr"],
+                    r["global_q75_event_descr"],
+                    r["global_q95_event_descr"],
+                    r["global_cnt_event_descr"],
+                    r["global_cv_event_descr"],
+                    r["fraud_rate_event_descr"],
+                    r["fraud_count_event_descr"],
+                    r["train_total_count_event_descr"],
+                    r["woe_event_descr"],
+                    r["global_cnt_clean_event_descr"],
+                    r["global_q90_event_descr"],
+                    r["global_q99_event_descr"],
+                ],
+                dtype=np.float64,
+            )
+
+        df_p = pd.read_parquet(d / "pos_cd.parquet")
+        for _, r in df_p.iterrows():
+            key = _axis_key_from_parquet_cell(r["pos_cd"], False)
+            self.axis_pos_cd[key] = np.array(
+                [
+                    r["global_mean_amount_pos_cd"],
+                    r["global_std_amount_pos_cd"],
+                    r["global_median_amount_pos_cd"],
+                    r["global_q25_pos_cd"],
+                    r["global_q75_pos_cd"],
+                    r["global_q95_pos_cd"],
+                    r["global_cnt_pos_cd"],
+                    r["global_cv_pos_cd"],
+                    r["fraud_rate_pos_cd"],
+                    r["fraud_count_pos_cd"],
+                    r["train_total_count_pos_cd"],
+                    r["woe_pos_cd"],
+                    r["global_cnt_clean_pos_cd"],
+                    r["global_q90_pos_cd"],
+                    r["global_q99_pos_cd"],
+                ],
+                dtype=np.float64,
+            )
+
+        df_tza = pd.read_parquet(d / "timezone_alone.parquet")
+        for _, r in df_tza.iterrows():
+            key = _axis_key_from_parquet_cell(r["timezone"], True)
+            self.axis_tz_alone[key] = np.array(
+                [
+                    r["global_mean_amount_tz_alone"],
+                    r["global_std_amount_tz_alone"],
+                    r["global_median_amount_tz_alone"],
+                    r["global_q25_tz_alone"],
+                    r["global_q75_tz_alone"],
+                    r["global_q95_tz_alone"],
+                    r["global_cnt_tz_alone"],
+                    r["global_cv_tz_alone"],
+                    r["fraud_rate_tz_alone"],
+                    r["fraud_count_tz_alone"],
+                    r["train_total_count_tz_alone"],
+                    r["woe_tz_alone"],
+                    r["global_cnt_clean_tz_alone"],
+                    r["global_q90_tz_alone"],
+                    r["global_q99_tz_alone"],
+                ],
+                dtype=np.float64,
+            )
+
+        if (
+            not self.mcc
+            or not self.channel
+            or not self.tz
+            or not self.event
+            or not self.axis_event_descr
+            or not self.axis_pos_cd
+            or not self.axis_tz_alone
+        ):
+            raise RuntimeError(f"global aggregates: main tables empty after reading {d}")
         if MCC_GLOBAL_KEY not in self.mcc:
-            raise RuntimeError(f"global aggregates: нет строки MCC global fallback в {d / 'mcc.parquet'}")
+            raise RuntimeError(f"global aggregates: missing MCC global fallback row in {d / 'mcc.parquet'}")
 
         self.loaded = True
 
@@ -564,6 +739,24 @@ class GlobalCategoryLookups:
         if s is not None:
             return s
         return self.event.get("__GLOBAL__")
+
+    def _ed_row(self, k: str) -> np.ndarray | None:
+        s = self.axis_event_descr.get(k)
+        if s is not None:
+            return s
+        return self.axis_event_descr.get("__GLOBAL__")
+
+    def _pos_row(self, k: str) -> np.ndarray | None:
+        s = self.axis_pos_cd.get(k)
+        if s is not None:
+            return s
+        return self.axis_pos_cd.get("__GLOBAL__")
+
+    def _tz_alone_row(self, k: str) -> np.ndarray | None:
+        s = self.axis_tz_alone.get(k)
+        if s is not None:
+            return s
+        return self.axis_tz_alone.get("__GLOBAL__")
 
     def _put_joint(self, out: list[float], mcc_k: int, chk: str, cur_raw: Any, tz_raw: Any) -> None:
         t = self.mcc_totals_n.get(mcc_k, 0)
@@ -607,6 +800,17 @@ class GlobalCategoryLookups:
         _put_block_ev(amount, self._ev_row(ek), out_list)
         self._put_joint(out_list, mcc_k, ck, row.get("currency_iso_cd"), row.get("timezone"))
 
+        ed_raw = row.get("event_descr")
+        if ed_raw is None or (isinstance(ed_raw, str) and not str(ed_raw).strip()):
+            ed_raw = row.get("event_desc")
+        ed_k = _string_axis_key_missing(ed_raw)
+        pos_k = _string_axis_key_missing(row.get("pos_cd"))
+        tz_ak = _tz_alone_key(row.get("timezone"))
+
+        _put_block_channel(amount, self._ed_row(ed_k), out_list)
+        _put_block_channel(amount, self._pos_row(pos_k), out_list)
+        _put_block_channel(amount, self._tz_alone_row(tz_ak), out_list)
+
         if len(out_list) != len(GLOBAL_CATEGORY_FEATURE_NAMES):
             raise RuntimeError(
                 f"global category feature count mismatch: got {len(out_list)}, expected {len(GLOBAL_CATEGORY_FEATURE_NAMES)}"
@@ -616,4 +820,4 @@ class GlobalCategoryLookups:
 
 def default_aggregates_dir(project_root: Path | None = None) -> Path:
     root = project_root or Path(__file__).resolve().parent.parent
-    return root / "output" / "global_aggregates"
+    return root / "output" / "datasets" / "global_aggregates"

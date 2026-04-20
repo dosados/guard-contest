@@ -1,17 +1,5 @@
-"""
-Грид-сёрч гиперпараметров XGBoost в том же режиме, что и training/main.py:
-ExtMemQuantileDMatrix / QuantileDMatrix + DataIter, time split по event_dttm,
-eval_metric aucpr, early stopping, PR-AUC на val со sample_weight (как в DMatrix).
-
-Метрика каждой конфигурации дописывается в JSONL (по умолчанию training/grid_search/xgb_grid_trials.jsonl)
-сразу после trial.
-
-Сетка перебора задаётся только в training.config.XGB_PARAM_GRID.
-"""
-
 from __future__ import annotations
 
-import argparse
 import csv
 import itertools
 import json
@@ -26,7 +14,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from shared.config import OUTPUT_DIR, TRAIN_DATASET_PATH
+from shared.config import TRAIN_DATASET_PATH, XGB_EXTMEM_GRID_TRAIN_DIR, XGB_EXTMEM_GRID_VAL_DIR
 from training.config import (
     VAL_RATIO,
     XGB_EXTERNAL_PARQUET_BATCH_ROWS,
@@ -41,10 +29,7 @@ GRID_SEARCH_DIR = Path(__file__).resolve().parent / "grid_search"
 
 
 def _xgb_params_from_combo(combo: dict[str, Any]) -> dict[str, float | int | str]:
-    """
-    Те же имена полей, что в training/main._build_xgb_train_params (XGBoost API).
-    Ключи из combo дополняются дефолтами из XGB_PARAMS, чтобы неполная сетка оставалась валидной.
-    """
+    # combo + XGB_PARAMS defaults → XGBoost train param dict
     base = {
         "learning_rate": float(XGB_PARAMS["learning_rate"]),
         "max_depth": int(XGB_PARAMS["max_depth"]),
@@ -90,13 +75,10 @@ def run_grid_search(
     ext_train_cache: Path | None = None,
     ext_val_cache: Path | None = None,
 ) -> tuple[dict[str, Any], float, list[dict[str, Any]], Any, Callable[[], None]]:
-    """
-    Возвращает (лучший combo, лучший PR-AUC, все строки результатов, бустер лучшего прогона, cleanup для него).
-    После save_model(best) вызовите cleanup(), иначе останутся дисковый кэш и ссылки на DMatrix.
-    """
+    # (best_combo, best_pr, rows, booster, cleanup)
     grid = param_grid if param_grid is not None else XGB_PARAM_GRID
     if not path.exists():
-        raise FileNotFoundError(f"Не найден {path}")
+        raise FileNotFoundError(f"Not found: {path}")
 
     br = int(batch_rows if batch_rows is not None else XGB_EXTERNAL_PARQUET_BATCH_ROWS)
     rounds = max(1, int(num_boost_round if num_boost_round is not None else XGB_PARAMS.get("n_estimators", 600)))
@@ -106,12 +88,13 @@ def run_grid_search(
 
     combos = list(_iter_grid(grid))
     if not combos:
-        raise ValueError("Пустая сетка гиперпараметров.")
+        raise ValueError("Empty hyperparameter grid.")
     if max_trials is not None:
         combos = combos[: max_trials]
 
-    train_cache = ext_train_cache if ext_train_cache is not None else OUTPUT_DIR / "xgb_grid_extmem_train"
-    val_cache = ext_val_cache if ext_val_cache is not None else OUTPUT_DIR / "xgb_grid_extmem_val"
+    train_cache = ext_train_cache if ext_train_cache is not None else XGB_EXTMEM_GRID_TRAIN_DIR
+    val_cache = ext_val_cache if ext_val_cache is not None else XGB_EXTMEM_GRID_VAL_DIR
+    train_cache.parent.mkdir(parents=True, exist_ok=True)
 
     results: list[dict[str, Any]] = []
     best_combo: dict[str, Any] | None = None
@@ -195,85 +178,40 @@ def main() -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
-    p = argparse.ArgumentParser(description="Грид-сёрч XGBoost (как training/main: QuantileDMatrix, PR-AUC).")
-    p.add_argument(
-        "--dataset",
-        type=Path,
-        default=TRAIN_DATASET_PATH,
-        help="Путь к train parquet (по умолчанию shared.config.TRAIN_DATASET_PATH).",
-    )
-    p.add_argument(
-        "--out-csv",
-        type=Path,
-        default=GRID_SEARCH_DIR / "xgb_grid_search_results.csv",
-        help="Таблица всех комбинаций и PR-AUC (по умолчанию training/grid_search/).",
-    )
-    p.add_argument(
-        "--out-best-params",
-        type=Path,
-        default=GRID_SEARCH_DIR / "xgb_best_params.json",
-        help="JSON с лучшими гиперпараметрами и PR-AUC (по умолчанию training/grid_search/).",
-    )
-    p.add_argument(
-        "--save-best",
-        type=Path,
-        default=GRID_SEARCH_DIR / "model_xgb_best.json",
-        help="Лучший бустер XGBoost (по умолчанию training/grid_search/model_xgb_best.json).",
-    )
-    p.add_argument(
-        "--no-save-model",
-        action="store_true",
-        help="Не сохранять файл модели (--save-best), только CSV и JSON с гиперпараметрами.",
-    )
-    p.add_argument(
-        "--trials-log",
-        type=Path,
-        default=GRID_SEARCH_DIR / "xgb_grid_trials.jsonl",
-        help="JSONL: одна строка JSON на trial сразу после метрики.",
-    )
-    p.add_argument(
-        "--no-trials-log",
-        action="store_true",
-        help="Не писать построчный лог trials.",
-    )
-    p.add_argument(
-        "--batch-rows",
-        type=int,
-        default=None,
-        help=f"Батч parquet (по умолчанию training.config.XGB_EXTERNAL_PARQUET_BATCH_ROWS={XGB_EXTERNAL_PARQUET_BATCH_ROWS}).",
-    )
-    p.add_argument(
-        "--num-boost-round",
-        type=int,
-        default=None,
-        help="Число деревьев / раундов (по умолчанию XGB_PARAMS n_estimators).",
-    )
-    p.add_argument("--max-trials", type=int, default=None, help="Ограничить число первых комбинаций сетки.")
-    p.add_argument("--val-ratio", type=float, default=VAL_RATIO)
-    args = p.parse_args()
+    dataset = TRAIN_DATASET_PATH
+    out_csv = GRID_SEARCH_DIR / "xgb_grid_search_results.csv"
+    out_best_params = GRID_SEARCH_DIR / "xgb_best_params.json"
+    save_best = GRID_SEARCH_DIR / "model_xgb_best.json"
+    no_save_model = False
+    trials_log_path = GRID_SEARCH_DIR / "xgb_grid_trials.jsonl"
+    no_trials_log = False
+    batch_rows: int | None = None
+    num_boost_round: int | None = None
+    max_trials: int | None = None
+    val_ratio = VAL_RATIO
 
-    trials_log = None if args.no_trials_log else args.trials_log
+    trials_log = None if no_trials_log else trials_log_path
     best_combo, best_pr, rows, best_booster, best_cleanup = run_grid_search(
-        args.dataset,
+        dataset,
         param_grid=XGB_PARAM_GRID,
-        val_ratio=args.val_ratio,
-        batch_rows=args.batch_rows,
-        num_boost_round=args.num_boost_round,
-        max_trials=args.max_trials,
+        val_ratio=val_ratio,
+        batch_rows=batch_rows,
+        num_boost_round=num_boost_round,
+        max_trials=max_trials,
         trials_log_path=trials_log,
     )
-    _write_results_csv(rows, args.out_csv)
-    _write_best_hyperparams(args.out_best_params, best_combo, best_pr)
-    logger.info("Лучшая комбинация: %s PR-AUC=%.6f", best_combo, best_pr)
-    logger.info("Результаты: %s", args.out_csv)
-    logger.info("Лучшие гиперпараметры: %s", args.out_best_params)
+    _write_results_csv(rows, out_csv)
+    _write_best_hyperparams(out_best_params, best_combo, best_pr)
+    logger.info("Best combo: %s PR-AUC=%.6f", best_combo, best_pr)
+    logger.info("Results: %s", out_csv)
+    logger.info("Best hyperparameters: %s", out_best_params)
     if trials_log is not None:
-        logger.info("Лог по trial (JSONL): %s", trials_log)
+        logger.info("Per-trial log (JSONL): %s", trials_log)
 
-    if not args.no_save_model:
-        args.save_best.parent.mkdir(parents=True, exist_ok=True)
-        best_booster.save_model(str(args.save_best))
-        logger.info("Лучшая модель сохранена: %s", args.save_best)
+    if not no_save_model:
+        save_best.parent.mkdir(parents=True, exist_ok=True)
+        best_booster.save_model(str(save_best))
+        logger.info("Best model saved: %s", save_best)
     best_cleanup()
 
 

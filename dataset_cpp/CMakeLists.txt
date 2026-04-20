@@ -4,7 +4,7 @@ project(build_dataset_cpp LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Искать Arrow/Parquet в префиксе активированного env conda
+# Resolve Arrow/Parquet from the active conda env prefix
 if(DEFINED ENV{CONDA_PREFIX})
   list(PREPEND CMAKE_PREFIX_PATH "$ENV{CONDA_PREFIX}")
 endif()
